@@ -162,6 +162,48 @@ async def run_task(task, log_fn, stop_event=None):
                     )
                     await random_delay("after_comment_submit", delays)
 
+        # ═══════════════════════════════════════
+        # SCENARIO: 시나리오 모드 (txt 파일 기반)
+        # actions 리스트를 순서대로 실행 (댓글/대댓글 혼합)
+        # ═══════════════════════════════════════
+        scenario = task.get("scenario", [])
+        if scenario:
+            log_fn(f"━━━ 시나리오 실행 ({len(scenario)}개 액션) ━━━")
+            for idx, act in enumerate(scenario, 1):
+                if should_stop():
+                    log_fn("⚠ 작업 중단됨")
+                    return {"success": False, "error": "사용자 중단"}
+
+                acc = act.get("account")
+                if not acc:
+                    log_fn(f"⚠ action #{idx}: 계정 정보 없음 - 건너뜀")
+                    continue
+
+                log_fn(f"━━━ [{idx}/{len(scenario)}] {act.get('action')} ({acc.get('label', acc.get('id', ''))[:10]}) ━━━")
+
+                log_fn("IP 변경 중...")
+                await change_ip(log_fn, delays)
+                await random_delay("between_accounts", delays)
+
+                try:
+                    async with new_session() as (ctx, page):
+                        ok = await naver_login(page, acc["id"], acc["pw"], log_fn)
+                        if not ok:
+                            log_fn(f"⚠ 로그인 실패 - action #{idx} 건너뜀")
+                            continue
+                        await random_delay("after_login", delays)
+
+                        if act["action"] == "comment":
+                            await write_comment(page, post_url, act["text"], log_fn)
+                        elif act["action"] == "reply":
+                            await write_reply(page, post_url, act["to_index"], act["text"], log_fn)
+                        else:
+                            log_fn(f"⚠ 알 수 없는 action: {act['action']}")
+
+                        await random_delay("after_comment_submit", delays)
+                except Exception as e:
+                    log_fn(f"⚠ action #{idx} 오류 - 계속 진행: {e}")
+
         log_fn("━━━━━━━━━━━━━━━━━━━━━━━━")
         log_fn("✅ 작업 완료!")
         log_fn(f"글 URL: {post_url}")

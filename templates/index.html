@@ -120,9 +120,31 @@
       </div>
     </div>
 
+    <!-- TXT 파일 업로드 (시나리오 모드) -->
+    <div class="section" style="border:2px solid #ffc107;background:rgba(255,193,7,0.05)">
+      <div class="section-title">📄 TXT 파일 자동 실행</div>
+      <p style="font-size:12px;color:var(--muted);margin-bottom:10px">
+        <code>제목:</code>, <code>---</code>, 본문, <code>---</code>, <code>댓글1:</code>, <code>ㄴ 작성자:</code>, <code>ㄴ 댓글2:</code> 형식 파일 업로드
+      </p>
+      <div class="form-row">
+        <div class="form-label">파일</div>
+        <input type="file" id="scenarioFile" accept=".txt" class="form-input" onchange="previewScenario()">
+      </div>
+      <div class="form-row">
+        <div class="form-label">카페 URL</div>
+        <input id="scenarioCafeUrl" class="form-input" placeholder="카페 영문주소 (예: o2note)">
+      </div>
+      <div class="form-row">
+        <div class="form-label">게시판</div>
+        <input id="scenarioBoardName" class="form-input" placeholder="게시판 이름 (선택사항)">
+      </div>
+      <div id="scenarioPreview" style="display:none;margin-top:10px;padding:10px;background:rgba(0,0,0,0.2);border-radius:6px;font-size:12px"></div>
+      <button id="btnScenarioRun" class="btn btn-primary" style="margin-top:10px;width:100%" onclick="runScenario()" disabled>📤 파일로 시나리오 실행</button>
+    </div>
+
     <!-- Task Mode -->
     <div class="section">
-      <div class="section-title">글 설정</div>
+      <div class="section-title">글 설정 (수동 작성)</div>
       <div class="mode-toggle">
         <button class="mode-btn active" onclick="setMode('new')">새 글 작성</button>
         <button class="mode-btn" onclick="setMode('edit')">기존 글 수정</button>
@@ -371,6 +393,76 @@ function escHtml(s) {
 }
 
 // ── Run Task ──
+let scenarioText = "";
+
+async function previewScenario() {
+  const file = document.getElementById('scenarioFile').files[0];
+  const preview = document.getElementById('scenarioPreview');
+  const btn = document.getElementById('btnScenarioRun');
+  if (!file) {
+    preview.style.display = 'none';
+    btn.disabled = true;
+    return;
+  }
+  scenarioText = await file.text();
+  const formData = new FormData();
+  formData.append('file', file);
+  try {
+    const res = await fetch('/api/scenario/parse', { method: 'POST', body: formData });
+    const data = await res.json();
+    if (data.error) {
+      preview.innerHTML = `<span style="color:#dc3545">오류: ${data.error}</span>`;
+      preview.style.display = 'block';
+      btn.disabled = true;
+      return;
+    }
+    const commentCount = data.actions.filter(a => a.action === 'comment').length;
+    const replyCount = data.actions.filter(a => a.action === 'reply').length;
+    const missingStr = data.missing_nums.length
+      ? `<div style="color:#dc3545;margin-top:6px">⚠ 미등록 계정: 댓글 ${data.missing_nums.join(', ')}</div>`
+      : `<div style="color:#28a745;margin-top:6px">✓ 필요 계정 모두 등록됨</div>`;
+    preview.innerHTML = `
+      <div><strong>제목:</strong> ${data.title}</div>
+      <div><strong>본문:</strong> ${data.body.substring(0, 80)}${data.body.length > 80 ? '...' : ''}</div>
+      <div style="margin-top:6px"><strong>댓글 ${commentCount}개</strong> / <strong>대댓글 ${replyCount}개</strong> / 총 액션 ${data.actions.length}개</div>
+      <div><strong>필요 commenter:</strong> ${data.commenter_nums.join(', ')}</div>
+      ${missingStr}
+    `;
+    preview.style.display = 'block';
+    btn.disabled = data.missing_nums.length > 0;
+  } catch (e) {
+    preview.innerHTML = `<span style="color:#dc3545">업로드 오류: ${e}</span>`;
+    preview.style.display = 'block';
+    btn.disabled = true;
+  }
+}
+
+async function runScenario() {
+  const cafeUrl = document.getElementById('scenarioCafeUrl').value.trim();
+  if (!cafeUrl) { alert('카페 URL을 입력해주세요'); return; }
+  if (!scenarioText) { alert('파일을 먼저 선택해주세요'); return; }
+  if (!confirm('시나리오를 실행하시겠습니까?\n진행 중 중단 버튼으로 멈출 수 있습니다.')) return;
+
+  const payload = {
+    text: scenarioText,
+    cafe_url: cafeUrl,
+    board_name: document.getElementById('scenarioBoardName').value.trim(),
+  };
+  const res = await fetch('/api/scenario/run', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json();
+  if (data.error) {
+    alert('오류: ' + data.error);
+  } else {
+    alert(data.message || '시작됨');
+    document.getElementById('btnRun').disabled = true;
+    document.getElementById('btnStop').disabled = false;
+  }
+}
+
 async function startTask() {
   // Gather data
   const comments = [];
