@@ -1,4 +1,9 @@
-"""Naver Cafe comment and reply writing."""
+"""Naver Cafe comment and reply writing.
+
+네이버 카페는 공유 댓글창(textarea.comment_inbox_text)을 사용.
+- 일반 댓글: 바로 입력 → 등록
+- 대댓글: 대상 댓글의 "답글쓰기" 클릭 → (내부적으로 답글 모드 전환) → 같은 textarea에 입력 → 등록
+"""
 import asyncio
 import random
 
@@ -7,78 +12,106 @@ async def human_delay(min_s=0.5, max_s=1.5):
     await asyncio.sleep(random.uniform(min_s, max_s))
 
 
-async def get_cafe_frame(page):
-    """Get the cafe_main iframe if it exists, otherwise return page."""
-    cafe_frame = page.frame("cafe_main")
-    return cafe_frame if cafe_frame else page
+async def _find_comment_textarea(page, max_wait=20):
+    """공유 댓글창 (textarea.comment_inbox_text) 탐색 — visible한 것"""
+    for attempt in range(max_wait // 2):
+        for t in [page] + list(page.frames):
+            try:
+                els = await t.query_selector_all('textarea.comment_inbox_text, textarea[placeholder*="댓글"]')
+                for el in els:
+                    box = await el.bounding_box()
+                    if box and box['width'] > 100:
+                        return el, t
+            except Exception:
+                pass
+        await asyncio.sleep(2)
+    return None, None
+
+
+async def _find_register_btn(page):
+    """댓글 등록 버튼 (.btn_register) 탐색 — visible"""
+    for t in [page] + list(page.frames):
+        try:
+            els = await t.query_selector_all('a.btn_register, button.btn_register, .btn_register')
+            for el in els:
+                box = await el.bounding_box()
+                if box and box['width'] > 10 and box['y'] > 0:
+                    return el
+        except Exception:
+            pass
+    return None
+
+
+async def _scroll_to_bottom(page):
+    """페이지와 모든 iframe을 끝까지 스크롤 (lazy-load 트리거)"""
+    try:
+        for _ in range(3):
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            for f in page.frames:
+                try:
+                    await f.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                except Exception:
+                    pass
+            await asyncio.sleep(1.5)
+    except Exception:
+        pass
 
 
 async def write_comment(page, post_url, comment_text, log_fn=None):
-    """Write a comment on a post."""
+    """Write a top-level comment."""
     def log(msg):
         if log_fn:
             log_fn(msg)
 
     try:
-        log(f"댓글 작성 페이지 이동...")
-        await page.goto(post_url, wait_until="networkidle", timeout=30000)
-        await human_delay(2, 4)
+        page.on("dialog", lambda d: asyncio.create_task(d.dismiss()))
 
-        target = await get_cafe_frame(page)
+        log(f"게시글 이동: {post_url[:80]}")
+        try:
+            await page.goto(post_url, wait_until="domcontentloaded", timeout=30000)
+        except Exception as e:
+            log(f"이동 타임아웃(무시): {e}")
+        await human_delay(3, 5)
 
-        # Find comment textarea
-        log("댓글 입력 중...")
-        comment_box = await target.query_selector(
-            "textarea.comment_inbox, "
-            ".comment_box textarea, "
-            "textarea[placeholder*='댓글'], "
-            ".CommentWriter textarea"
-        )
+        # lazy-load 트리거
+        await _scroll_to_bottom(page)
 
-        if not comment_box:
-            # Try clicking a "댓글 작성" area first
-            write_area = await target.query_selector(
-                ".comment_write_area, "
-                ".comment_box, "
-                "[class*='comment'] [class*='write']"
-            )
-            if write_area:
-                await write_area.click()
-                await human_delay(0.5, 1)
-                comment_box = await target.query_selector(
-                    "textarea.comment_inbox, textarea[placeholder*='댓글']"
-                )
-
-        if not comment_box:
-            log("⚠ 댓글 입력란을 찾을 수 없음")
+        # 댓글창 탐색
+        log("댓글창 탐색...")
+        tb, tb_frame = await _find_comment_textarea(page, max_wait=15)
+        if not tb:
+            log("⚠ 댓글창을 찾을 수 없음")
+            try:
+                import os as _os
+                path = _os.path.join(_os.path.dirname(__file__), "..", "debug_no_comment.png")
+                await page.screenshot(path=path, full_page=True)
+                log(f"디버그 스크린샷: {path}")
+            except Exception:
+                pass
             return False
 
-        await comment_box.click()
+        await tb.scroll_into_view_if_needed()
+        await tb.click()
         await human_delay(0.5, 1)
 
-        # Type comment with human-like speed
+        # 댓글 입력
+        log("댓글 입력 중...")
         for char in comment_text:
-            await target.keyboard.type(char, delay=random.randint(30, 120))
+            await page.keyboard.type(char, delay=random.randint(30, 120))
             if random.random() < 0.08:
                 await human_delay(0.2, 0.5)
-
         await human_delay(0.5, 1.5)
 
-        # Click submit
-        submit_btn = await target.query_selector(
-            "a.btn_register, "
-            "button.btn_register, "
-            "a:has-text('등록'), "
-            "button:has-text('등록')"
-        )
-        if submit_btn:
-            await submit_btn.click()
-            await human_delay(2, 4)
-            log("댓글 작성 완료")
-            return True
-        else:
-            log("⚠ 댓글 등록 버튼을 찾을 수 없음")
+        # 등록
+        pub = await _find_register_btn(page)
+        if not pub:
+            log("⚠ 등록 버튼 없음")
             return False
+
+        await pub.click()
+        await human_delay(3, 5)
+        log("댓글 작성 완료")
+        return True
 
     except Exception as e:
         log(f"댓글 작성 오류: {str(e)}")
@@ -86,101 +119,94 @@ async def write_comment(page, post_url, comment_text, log_fn=None):
 
 
 async def write_reply(page, post_url, comment_index, reply_text, log_fn=None):
-    """Write a reply to a specific comment (by index, 0-based)."""
+    """Reply to comment at given index (0-based)."""
     def log(msg):
         if log_fn:
             log_fn(msg)
 
     try:
-        # If we're not already on the post page, navigate
+        page.on("dialog", lambda d: asyncio.create_task(d.dismiss()))
+
         if post_url not in page.url:
-            await page.goto(post_url, wait_until="networkidle", timeout=30000)
-            await human_delay(2, 4)
+            try:
+                await page.goto(post_url, wait_until="domcontentloaded", timeout=30000)
+            except Exception as e:
+                log(f"이동 타임아웃(무시): {e}")
+            await human_delay(3, 5)
+            await _scroll_to_bottom(page)
 
-        target = await get_cafe_frame(page)
+        # 댓글 목록 탐색 (li.CommentItem)
+        log(f"댓글 목록 탐색...")
+        comments = []
+        for attempt in range(8):
+            comments = []
+            for t in [page] + list(page.frames):
+                try:
+                    els = await t.query_selector_all('li.CommentItem')
+                    for e in els:
+                        comments.append((e, t))
+                except Exception:
+                    pass
+            if comments:
+                break
+            await asyncio.sleep(2)
 
-        # Find all comments
-        comment_items = await target.query_selector_all(
-            ".comment_item, "
-            ".CommentItem, "
-            "li[class*='comment'], "
-            ".comment_box_inner"
-        )
-
-        if comment_index >= len(comment_items):
-            log(f"⚠ 댓글 #{comment_index + 1}을 찾을 수 없음 (총 {len(comment_items)}개)")
+        if not comments:
+            log(f"⚠ 댓글이 없음")
             return False
 
-        comment_el = comment_items[comment_index]
-        log(f"댓글 #{comment_index + 1}에 대댓글 작성 중...")
-
-        # Click reply button on this comment
-        reply_btn = await comment_el.query_selector(
-            "a:has-text('답글'), "
-            "button:has-text('답글'), "
-            "a.comment_info_button, "
-            "[class*='reply'] button"
-        )
-        if reply_btn:
-            await reply_btn.click()
-            await human_delay(0.5, 1.5)
-        else:
-            log(f"⚠ 답글 버튼을 찾을 수 없음")
+        if comment_index >= len(comments):
+            log(f"⚠ 댓글 #{comment_index + 1} 없음 (수집: {len(comments)}개)")
             return False
 
-        # Find the reply textarea (should appear after clicking reply)
-        reply_box = await target.query_selector(
-            ".comment_write_area.reply textarea, "
-            ".reply_write textarea, "
-            "textarea.comment_inbox"
-        )
+        target_comment, target_frame = comments[comment_index]
+        log(f"댓글 #{comment_index + 1}의 답글쓰기 버튼 클릭...")
 
-        if not reply_box:
-            # Try broader search
-            await human_delay(0.5, 1)
-            textareas = await target.query_selector_all("textarea.comment_inbox")
-            # The reply textarea is usually the last one or the one that just appeared
-            if len(textareas) > 1:
-                reply_box = textareas[-1]
-            elif textareas:
-                reply_box = textareas[0]
+        # 답글쓰기 버튼 클릭 (a.comment_info_button with text containing 답글)
+        reply_btn = None
+        try:
+            els = await target_comment.query_selector_all('a.comment_info_button')
+            for el in els:
+                txt = (await el.text_content() or '').strip()
+                if '답글' in txt:
+                    reply_btn = el
+                    break
+        except Exception:
+            pass
 
-        if not reply_box:
-            log("⚠ 대댓글 입력란을 찾을 수 없음")
+        if not reply_btn:
+            log("⚠ 답글쓰기 버튼을 찾을 수 없음")
             return False
 
-        await reply_box.click()
+        await reply_btn.click()
+        await human_delay(1.5, 2.5)
+
+        # 공유 댓글창 재탐색 (답글 모드로 전환됨)
+        tb, tb_frame = await _find_comment_textarea(page, max_wait=10)
+        if not tb:
+            log("⚠ 답글 입력창을 찾을 수 없음")
+            return False
+
+        await tb.scroll_into_view_if_needed()
+        await tb.click()
         await human_delay(0.3, 0.7)
 
-        # Type reply
         for char in reply_text:
-            await target.keyboard.type(char, delay=random.randint(30, 120))
+            await page.keyboard.type(char, delay=random.randint(30, 120))
             if random.random() < 0.08:
                 await human_delay(0.2, 0.5)
-
         await human_delay(0.5, 1.5)
 
-        # Submit reply
-        submit_btn = await target.query_selector(
-            ".comment_write_area.reply a.btn_register, "
-            ".reply_write button:has-text('등록'), "
-            "a.btn_register, "
-            "button.btn_register"
-        )
-        if not submit_btn:
-            # Try all register buttons, pick the last visible one
-            btns = await target.query_selector_all("a.btn_register, button:has-text('등록')")
-            if btns:
-                submit_btn = btns[-1]
-
-        if submit_btn:
-            await submit_btn.click()
-            await human_delay(2, 4)
-            log(f"대댓글 #{comment_index + 1} 작성 완료")
-            return True
-        else:
-            log("⚠ 대댓글 등록 버튼을 찾을 수 없음")
+        # 등록
+        pub = await _find_register_btn(page)
+        if not pub:
+            log("⚠ 등록 버튼 없음")
             return False
+
+        await pub.click()
+        await human_delay(3, 5)
+        log(f"대댓글 #{comment_index + 1} 작성 완료")
+        return True
 
     except Exception as e:
         log(f"대댓글 작성 오류: {str(e)}")
