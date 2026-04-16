@@ -64,8 +64,8 @@ async def toggle_airplane_mode(log_fn=None):
         if log_fn:
             log_fn(msg)
 
-    # 1차 시도 (7초)
-    new_ip, old_ip = await _single_toggle(log, wait_on=7, wait_off_loop=30)
+    # 1차 시도 (5초 - 빠른 경로)
+    new_ip, old_ip = await _single_toggle(log, wait_on=5, wait_off_loop=30)
     if new_ip and new_ip != old_ip:
         return new_ip
 

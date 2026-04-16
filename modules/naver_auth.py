@@ -34,21 +34,21 @@ async def naver_login(page, account_id, account_pw, log_fn=None):
     try:
         log(f"네이버 로그인 시도: {account_id[:3]}***")
 
-        # Navigate to login page
-        await page.goto(SELECTORS["login_url"], wait_until="networkidle", timeout=30000)
-        await human_delay(1, 2)
+        # Navigate to login page (domcontentloaded 기준 - networkidle 대비 훨씬 빠름)
+        await page.goto(SELECTORS["login_url"], wait_until="domcontentloaded", timeout=15000)
+        await human_delay(0.5, 1.0)
 
         # Input ID via clipboard paste
         await clipboard_paste(page, SELECTORS["login_id"], account_id)
-        await human_delay(0.5, 1.0)
+        await human_delay(0.3, 0.6)
 
         # Input PW via clipboard paste
         await clipboard_paste(page, SELECTORS["login_pw"], account_pw)
-        await human_delay(0.5, 1.0)
+        await human_delay(0.3, 0.6)
 
         # Click login button
         await page.click(SELECTORS["login_btn"])
-        await human_delay(2, 4)
+        await human_delay(1.5, 2.5)
 
         # Wait for navigation (timeout은 무시하고 다음 체크로 진행)
         try:
