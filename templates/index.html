@@ -112,8 +112,8 @@
       <div style="display:flex;gap:6px">
         <input id="accId" class="form-input" placeholder="네이버 ID" style="flex:1">
         <input id="accPw" class="form-input" type="password" placeholder="비밀번호" style="flex:1">
-        <select id="accRole" class="form-input" style="flex:0 0 80px">
-          <option value="main">메인</option>
+        <select id="accRole" class="form-input" style="flex:0 0 100px">
+          <option value="main">글 작성자</option>
           <option value="commenter">댓글</option>
         </select>
         <button class="btn btn-outline btn-sm" onclick="addAccount()">추가</button>
@@ -131,16 +131,21 @@
         <input type="file" id="scenarioFile" accept=".txt" class="form-input" onchange="previewScenario()">
       </div>
       <div class="form-row">
+        <div class="form-label">글 작성자</div>
+        <select id="scenarioMainId" class="form-input"></select>
+      </div>
+      <div class="form-row">
         <div class="form-label">카페 URL</div>
         <input id="scenarioCafeUrl" class="form-input" placeholder="글쓰기 화면 URL 직접 붙여넣기 권장 (articles/write 포함)">
       </div>
       <div style="font-size:11px;color:var(--muted);margin:-8px 0 10px 0;padding-left:72px">
-        💡 가장 확실한 방법: 브라우저에서 해당 게시판 → 글쓰기 클릭 → 주소창 URL 복사해서 붙여넣기
+        💡 본문에 <code>[이미지1]</code> 마커 넣으면 아래에 업로드 슬롯이 자동 생성됩니다
       </div>
       <div class="form-row">
         <div class="form-label">게시판</div>
         <input id="scenarioBoardName" class="form-input" placeholder="게시판 이름 (선택사항)">
       </div>
+      <div id="scenarioImageSlots" style="margin-top:10px"></div>
       <div id="scenarioPreview" style="display:none;margin-top:10px;padding:10px;background:rgba(0,0,0,0.2);border-radius:6px;font-size:12px"></div>
       <button id="btnScenarioRun" class="btn btn-primary" style="margin-top:10px;width:100%" onclick="runScenario()" disabled>📤 파일로 시나리오 실행</button>
     </div>
@@ -158,6 +163,10 @@
         <input id="postUrl" class="form-input" placeholder="수정할 글 URL">
       </div>
 
+      <div class="form-row">
+        <div class="form-label">글 작성자</div>
+        <select id="manualMainId" class="form-input"></select>
+      </div>
       <div class="form-row">
         <div class="form-label">카페 URL</div>
         <input id="cafeUrl" class="form-input" placeholder="카페 영문주소 (예: mycafe123)">
@@ -237,9 +246,10 @@
 
 <script>
 // ── State ──
-let accounts = { main: null, commenters: [] };
+let accounts = { mains: [], commenters: [] };
 let taskMode = 'new';
 let eventSource = null;
+let scenarioImageNums = [];  // 파싱에서 발견된 이미지 번호 목록
 
 // ── Init ──
 async function init() {
@@ -273,19 +283,34 @@ function connectSSE() {
 async function loadAccounts() {
   const res = await fetch('/api/accounts');
   accounts = await res.json();
+  if (!accounts.mains) accounts.mains = [];
+  if (!accounts.commenters) accounts.commenters = [];
   renderAccounts();
+  updateMainSelects();
 }
 
 function renderAccounts() {
   const el = document.getElementById('accountsList');
   let html = '';
-  if (accounts.main) {
-    html += `<div class="account-tag"><span class="role">메인</span>${accounts.main.id}<span class="del" onclick="removeAccount('main',0)">×</span></div>`;
-  }
+  accounts.mains.forEach((m, i) => {
+    html += `<div class="account-tag"><span class="role">글${i+1}</span>${m.id}<span class="del" onclick="removeAccount('main',${i})">×</span></div>`;
+  });
   accounts.commenters.forEach((c, i) => {
     html += `<div class="account-tag"><span class="role">댓글${i+1}</span>${c.id}<span class="del" onclick="removeAccount('commenter',${i})">×</span></div>`;
   });
   el.innerHTML = html || '<span style="font-size:12px;color:var(--muted)">등록된 계정이 없습니다</span>';
+}
+
+function updateMainSelects() {
+  const options = accounts.mains.map((m, i) =>
+    `<option value="${m.id}">글 ${i+1} — ${m.id}</option>`).join('');
+  ['scenarioMainId', 'manualMainId'].forEach(id => {
+    const sel = document.getElementById(id);
+    if (!sel) return;
+    const prev = sel.value;
+    sel.innerHTML = options || '<option value="">등록된 글 작성자 없음</option>';
+    if (prev && accounts.mains.find(m => m.id === prev)) sel.value = prev;
+  });
 }
 
 async function addAccount() {
@@ -295,7 +320,12 @@ async function addAccount() {
   if (!id || !pw) return;
 
   if (role === 'main') {
-    accounts.main = { id, pw, label: '메인 계정' };
+    // 중복 체크
+    if (accounts.mains.find(m => m.id === id)) {
+      alert('이미 등록된 글 작성자입니다');
+      return;
+    }
+    accounts.mains.push({ id, pw, label: `글 ${accounts.mains.length + 1}` });
   } else {
     accounts.commenters.push({ id, pw, label: `댓글 ${accounts.commenters.length + 1}` });
   }
@@ -304,14 +334,19 @@ async function addAccount() {
   document.getElementById('accId').value = '';
   document.getElementById('accPw').value = '';
   renderAccounts();
+  updateMainSelects();
   updateCommentSelects();
 }
 
 async function removeAccount(type, idx) {
-  if (type === 'main') accounts.main = null;
+  if (type === 'main') accounts.mains.splice(idx, 1);
   else accounts.commenters.splice(idx, 1);
+  // 라벨 재정렬
+  accounts.mains.forEach((m, i) => m.label = `글 ${i+1}`);
+  accounts.commenters.forEach((c, i) => c.label = `댓글 ${i+1}`);
   await fetch('/api/accounts', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(accounts) });
   renderAccounts();
+  updateMainSelects();
   updateCommentSelects();
 }
 
@@ -424,14 +459,21 @@ async function previewScenario() {
     const missingStr = data.missing_nums.length
       ? `<div style="color:#dc3545;margin-top:6px">⚠ 미등록 계정: 댓글 ${data.missing_nums.join(', ')}</div>`
       : `<div style="color:#28a745;margin-top:6px">✓ 필요 계정 모두 등록됨</div>`;
+    const imgNums = data.image_nums || [];
+    const imgStr = imgNums.length
+      ? `<div style="color:#7c6fff;margin-top:6px">📷 본문 이미지 마커: ${imgNums.map(n => `[이미지${n}]`).join(', ')}</div>`
+      : '';
     preview.innerHTML = `
       <div><strong>제목:</strong> ${data.title}</div>
       <div><strong>본문:</strong> ${data.body.substring(0, 80)}${data.body.length > 80 ? '...' : ''}</div>
       <div style="margin-top:6px"><strong>댓글 ${commentCount}개</strong> / <strong>대댓글 ${replyCount}개</strong> / 총 액션 ${data.actions.length}개</div>
       <div><strong>필요 commenter:</strong> ${data.commenter_nums.join(', ')}</div>
+      ${imgStr}
       ${missingStr}
     `;
     preview.style.display = 'block';
+    scenarioImageNums = imgNums;
+    renderImageSlots();
     btn.disabled = data.missing_nums.length > 0;
   } catch (e) {
     preview.innerHTML = `<span style="color:#dc3545">업로드 오류: ${e}</span>`;
@@ -440,22 +482,51 @@ async function previewScenario() {
   }
 }
 
+function renderImageSlots() {
+  const slots = document.getElementById('scenarioImageSlots');
+  if (!scenarioImageNums || scenarioImageNums.length === 0) {
+    slots.innerHTML = '';
+    return;
+  }
+  slots.innerHTML = '<div style="font-size:12px;color:var(--muted);margin-bottom:6px">📷 본문 이미지 업로드</div>' +
+    scenarioImageNums.map(n => `
+      <div class="form-row" style="margin-bottom:6px">
+        <div class="form-label">[이미지${n}]</div>
+        <input type="file" accept="image/*" class="form-input scenario-image" data-num="${n}">
+      </div>
+    `).join('');
+}
+
 async function runScenario() {
   const cafeUrl = document.getElementById('scenarioCafeUrl').value.trim();
+  const mainId = document.getElementById('scenarioMainId').value;
   if (!cafeUrl) { alert('카페 URL을 입력해주세요'); return; }
   if (!scenarioText) { alert('파일을 먼저 선택해주세요'); return; }
+  if (!mainId) { alert('글 작성자를 등록/선택해주세요'); return; }
+
+  // 이미지 업로드 검증
+  const imageInputs = document.querySelectorAll('.scenario-image');
+  const imageFiles = {};
+  for (const inp of imageInputs) {
+    const num = inp.dataset.num;
+    const f = inp.files[0];
+    if (!f) {
+      alert(`[이미지${num}] 파일을 선택해주세요`);
+      return;
+    }
+    imageFiles[num] = f;
+  }
+
   if (!confirm('시나리오를 실행하시겠습니까?\n진행 중 중단 버튼으로 멈출 수 있습니다.')) return;
 
-  const payload = {
-    text: scenarioText,
-    cafe_url: cafeUrl,
-    board_name: document.getElementById('scenarioBoardName').value.trim(),
-  };
-  const res = await fetch('/api/scenario/run', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
+  const fd = new FormData();
+  fd.append('text', scenarioText);
+  fd.append('cafe_url', cafeUrl);
+  fd.append('main_id', mainId);
+  fd.append('board_name', document.getElementById('scenarioBoardName').value.trim());
+  Object.entries(imageFiles).forEach(([num, f]) => fd.append(`image_${num}`, f));
+
+  const res = await fetch('/api/scenario/run', { method: 'POST', body: fd });
   const data = await res.json();
   if (data.error) {
     alert('오류: ' + data.error);
@@ -488,6 +559,7 @@ async function startTask() {
 
   const task = {
     mode: taskMode,
+    main_id: document.getElementById('manualMainId').value,
     cafe_url: document.getElementById('cafeUrl').value.trim(),
     post_url: document.getElementById('postUrl').value.trim(),
     board_name: document.getElementById('boardName').value.trim(),
@@ -497,6 +569,7 @@ async function startTask() {
     replies,
   };
 
+  if (!task.main_id) { alert('글 작성자를 등록/선택해주세요'); return; }
   if (!task.cafe_url && taskMode === 'new') { alert('카페 URL을 입력하세요'); return; }
   if (!task.post_url && taskMode === 'edit') { alert('수정할 글 URL을 입력하세요'); return; }
 

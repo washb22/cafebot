@@ -78,7 +78,8 @@ async def run_task(task, log_fn, stop_event=None):
             if task["mode"] == "new":
                 post_url = await write_post(
                     page, task["cafe_url"], task["title"], task["body"],
-                    task.get("board_name"), log_fn
+                    task.get("board_name"), log_fn,
+                    image_map=task.get("image_map"),
                 )
                 if not post_url:
                     log_fn("❌ 글 작성 실패 - 작업 중단")

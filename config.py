@@ -8,14 +8,14 @@ LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
 
 # Delay ranges (seconds) - min, max
 DEFAULT_DELAYS = {
-    "after_login": (4, 7),
-    "before_typing": (1, 3),
-    "typing_char_delay": (0.05, 0.15),
-    "after_post_submit": (3, 6),
-    "after_comment_submit": (3, 5),
-    "after_browser_close": (2, 4),
-    "airplane_toggle_wait": (10, 18),
-    "between_accounts": (8, 15),
+    "after_login": (2, 4),
+    "before_typing": (0.5, 1.5),
+    "typing_char_delay": (0.015, 0.050),
+    "after_post_submit": (2, 4),
+    "after_comment_submit": (1.5, 3),
+    "after_browser_close": (1, 2),
+    "airplane_toggle_wait": (5, 10),
+    "between_accounts": (4, 8),
 }
 
 # Naver selectors

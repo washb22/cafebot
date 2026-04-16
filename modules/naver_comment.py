@@ -97,10 +97,10 @@ async def write_comment(page, post_url, comment_text, log_fn=None):
         # 댓글 입력
         log("댓글 입력 중...")
         for char in comment_text:
-            await page.keyboard.type(char, delay=random.randint(30, 120))
-            if random.random() < 0.08:
-                await human_delay(0.2, 0.5)
-        await human_delay(0.5, 1.5)
+            await page.keyboard.type(char, delay=random.randint(15, 50))
+            if random.random() < 0.05:
+                await human_delay(0.1, 0.3)
+        await human_delay(0.3, 0.8)
 
         # 등록
         pub = await _find_register_btn(page)
@@ -135,16 +135,35 @@ async def write_reply(page, post_url, comment_index, reply_text, log_fn=None):
             await human_delay(3, 5)
             await _scroll_to_bottom(page)
 
-        # 댓글 목록 탐색 (li.CommentItem)
-        log(f"댓글 목록 탐색...")
+        # 댓글 목록 탐색 (li.CommentItem 중 최상위 댓글만 — 답글/reply 제외)
+        # 버그: li.CommentItem 이 답글(class="CommentItem CommentItem--reply" 등)도 포함
+        # → JS evaluate 로 class 에 reply/answer 미포함 요소만 수집
+        log(f"댓글 목록 탐색 (최상위만)...")
         comments = []
         for attempt in range(8):
             comments = []
             for t in [page] + list(page.frames):
                 try:
+                    # JS로 최상위 댓글만 index 반환 (답글 제외)
+                    top_indices = await t.evaluate("""
+                        () => {
+                            const items = Array.from(document.querySelectorAll('li.CommentItem'));
+                            const indices = [];
+                            items.forEach((el, i) => {
+                                const cls = (el.className || '').toLowerCase();
+                                if (!cls.includes('reply') && !cls.includes('answer')) {
+                                    indices.push(i);
+                                }
+                            });
+                            return indices;
+                        }
+                    """)
+                    if not top_indices:
+                        continue
                     els = await t.query_selector_all('li.CommentItem')
-                    for e in els:
-                        comments.append((e, t))
+                    for idx in top_indices:
+                        if idx < len(els):
+                            comments.append((els[idx], t))
                 except Exception:
                     pass
             if comments:
@@ -192,10 +211,10 @@ async def write_reply(page, post_url, comment_index, reply_text, log_fn=None):
         await human_delay(0.3, 0.7)
 
         for char in reply_text:
-            await page.keyboard.type(char, delay=random.randint(30, 120))
-            if random.random() < 0.08:
-                await human_delay(0.2, 0.5)
-        await human_delay(0.5, 1.5)
+            await page.keyboard.type(char, delay=random.randint(15, 50))
+            if random.random() < 0.05:
+                await human_delay(0.1, 0.3)
+        await human_delay(0.3, 0.8)
 
         # 등록
         pub = await _find_register_btn(page)

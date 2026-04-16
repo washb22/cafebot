@@ -64,14 +64,14 @@ async def toggle_airplane_mode(log_fn=None):
         if log_fn:
             log_fn(msg)
 
-    # 1차 시도
-    new_ip, old_ip = await _single_toggle(log, wait_on=15, wait_off_loop=30)
+    # 1차 시도 (7초)
+    new_ip, old_ip = await _single_toggle(log, wait_on=7, wait_off_loop=30)
     if new_ip and new_ip != old_ip:
         return new_ip
 
     # 2차 시도: 더 길게 대기 (통신사 sticky IP 회피)
-    log("⚠ 1차 IP 변경 실패 - 30초 대기 후 재시도...")
-    new_ip2, _ = await _single_toggle(log, wait_on=30, wait_off_loop=30)
+    log("⚠ 1차 IP 변경 실패 - 15초 대기 후 재시도...")
+    new_ip2, _ = await _single_toggle(log, wait_on=15, wait_off_loop=30)
     if new_ip2 and new_ip2 != old_ip:
         return new_ip2
 

@@ -1,6 +1,7 @@
 """Naver Cafe post writing and editing."""
 import asyncio
 import random
+import re
 
 
 async def human_delay(min_s=0.5, max_s=1.5):
@@ -48,7 +49,137 @@ async def _find_visible(frames_list, selectors, min_w=100, min_h=10, max_wait=20
     return None, None
 
 
-async def write_post(page, cafe_url, title, body, board_name=None, log_fn=None):
+async def _insert_image(page, image_path, log_fn=None):
+    """SmartEditor 본문 입력 중 커서 위치에 이미지 삽입.
+    가장 불안정한 파트: 네이버 SmartEditor DOM 변경 시 selector 조정 필요.
+    여러 selector 후보를 순차 시도.
+    """
+    def log(msg):
+        if log_fn:
+            log_fn(msg)
+
+    # 툴바 사진 버튼 후보 (SmartEditor 2 / ONE 공통 추정)
+    photo_selectors = [
+        'button[aria-label*="사진"]',
+        'button[data-type="image"]',
+        'button.se-image-toolbar-button',
+        'button.se-toolbar-item-image',
+        'a.se2_photo',
+        'button:has(.se-toolbar-icon-image)',
+    ]
+
+    try:
+        # 파일 업로드 input 은 툴바 버튼 클릭 없이도 페이지에 존재할 가능성 있음 → 먼저 시도
+        for t in [page] + list(page.frames):
+            try:
+                inputs = await t.query_selector_all('input[type="file"]')
+                for inp in inputs:
+                    try:
+                        accept = await inp.get_attribute("accept") or ""
+                        if "image" in accept.lower() or accept == "":
+                            await inp.set_input_files(image_path)
+                            log(f"  이미지 업로드: {image_path.rsplit(chr(92), 1)[-1]}")
+                            await asyncio.sleep(4)
+                            return True
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+        # 툴바 버튼 클릭 → 파일 input 노출 기다리기
+        btn = None
+        btn_frame = None
+        for t in [page] + list(page.frames):
+            for sel in photo_selectors:
+                try:
+                    el = await t.query_selector(sel)
+                    if el:
+                        box = await el.bounding_box()
+                        if box and box["width"] > 5:
+                            btn = el
+                            btn_frame = t
+                            break
+                except Exception:
+                    continue
+            if btn:
+                break
+
+        if not btn:
+            log("  ⚠ SmartEditor 사진 버튼을 찾을 수 없음 — 이미지 건너뜀")
+            return False
+
+        await btn.click()
+        await asyncio.sleep(1.5)
+
+        # 파일 input 재탐색
+        for t in [page] + list(page.frames):
+            try:
+                inputs = await t.query_selector_all('input[type="file"]')
+                for inp in inputs:
+                    try:
+                        await inp.set_input_files(image_path)
+                        log(f"  이미지 업로드: {image_path.rsplit(chr(92), 1)[-1]}")
+                        await asyncio.sleep(4)
+                        return True
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+        log("  ⚠ 파일 업로드 input 을 찾을 수 없음")
+        return False
+    except Exception as e:
+        log(f"  ⚠ 이미지 삽입 오류: {e}")
+        return False
+
+
+async def _type_body_with_images(page, body_el, body, image_map, log_fn=None):
+    """본문을 [이미지N] 마커로 분할해 텍스트 + 이미지 순차 입력."""
+    def log(msg):
+        if log_fn:
+            log_fn(msg)
+
+    marker_re = re.compile(r'\[이미지(\d+)\]')
+    parts = []  # [("text", "..."), ("img", 1), ("text", "...")] 형태
+    pos = 0
+    for m in marker_re.finditer(body):
+        if m.start() > pos:
+            parts.append(("text", body[pos:m.start()]))
+        parts.append(("img", int(m.group(1))))
+        pos = m.end()
+    if pos < len(body):
+        parts.append(("text", body[pos:]))
+
+    for kind, val in parts:
+        if kind == "text":
+            text = val
+            lines = text.split("\n")
+            for i, line in enumerate(lines):
+                if line.strip():
+                    await page.keyboard.type(line, delay=random.randint(15, 50))
+                if i < len(lines) - 1:
+                    await page.keyboard.press("Enter")
+                    await human_delay(0.05, 0.15)
+        else:
+            num = val
+            path = (image_map or {}).get(num)
+            if not path:
+                log(f"  ⚠ [이미지{num}] 마커는 있으나 업로드된 파일 없음 — 텍스트 유지")
+                await page.keyboard.type(f"[이미지{num}]", delay=random.randint(15, 50))
+                continue
+            # 이미지 삽입 전후 개행
+            await page.keyboard.press("Enter")
+            await human_delay(0.2, 0.4)
+            await _insert_image(page, path, log_fn)
+            # 이미지 삽입 후 커서를 다음 줄로
+            try:
+                await body_el.click()
+            except Exception:
+                pass
+            await human_delay(0.3, 0.6)
+
+
+async def write_post(page, cafe_url, title, body, board_name=None, log_fn=None, image_map=None):
     """Write a new post on Naver Cafe."""
     def log(msg):
         if log_fn:
@@ -98,7 +229,7 @@ async def write_post(page, cafe_url, title, body, board_name=None, log_fn=None):
         log("제목 입력 중...")
         await title_el.click()
         await human_delay(0.3, 0.7)
-        await page.keyboard.type(title, delay=random.randint(30, 100))
+        await page.keyboard.type(title, delay=random.randint(15, 50))
         await human_delay(0.5, 1)
 
         # 본문 탐색 (.se-text-paragraph P 태그)
@@ -122,16 +253,21 @@ async def write_post(page, cafe_url, title, body, board_name=None, log_fn=None):
         except Exception:
             pass
         await body_el.click()
-        await human_delay(0.5, 1)
+        await human_delay(0.3, 0.7)
 
-        lines = body.split("\n")
-        for i, line in enumerate(lines):
-            if line.strip():
-                await page.keyboard.type(line, delay=random.randint(20, 80))
-            if i < len(lines) - 1:
-                await page.keyboard.press("Enter")
-                await human_delay(0.1, 0.3)
-        await human_delay(1, 2)
+        # 이미지 마커가 있으면 분할 입력, 없으면 기존 방식
+        if image_map and re.search(r'\[이미지\d+\]', body):
+            log("본문 입력 (이미지 마커 포함)...")
+            await _type_body_with_images(page, body_el, body, image_map, log_fn)
+        else:
+            lines = body.split("\n")
+            for i, line in enumerate(lines):
+                if line.strip():
+                    await page.keyboard.type(line, delay=random.randint(15, 50))
+                if i < len(lines) - 1:
+                    await page.keyboard.press("Enter")
+                    await human_delay(0.05, 0.15)
+        await human_delay(0.5, 1.2)
 
         # 등록 버튼 (A 태그, text='등록' 정확히 매칭, 임시등록 제외)
         log("등록 버튼 탐색...")

@@ -55,6 +55,10 @@ def parse_scenario_text(text):
         raise ValueError("제목을 찾을 수 없습니다. '제목 : ...' 형식이어야 합니다.")
     title = title_match.group(1).strip()
 
+    # 본문 내 이미지 마커 수집 — [이미지1], [이미지2], ... 등
+    image_marker_re = re.compile(r'\[이미지(\d+)\]')
+    image_nums = sorted({int(m) for m in image_marker_re.findall(body)})
+
     # 댓글/대댓글 파싱
     actions = []
     commenter_nums = set()
@@ -114,6 +118,7 @@ def parse_scenario_text(text):
         "body": body,
         "actions": actions,
         "commenter_nums": sorted(commenter_nums),
+        "image_nums": image_nums,
     }
 
 
