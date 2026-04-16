@@ -3,6 +3,7 @@ import os
 import sys
 import json
 import re
+import random
 import asyncio
 import threading
 import time
@@ -196,6 +197,61 @@ def run_task_api():
     return jsonify({"success": True, "message": "작업 시작됨"})
 
 
+def build_shuffled_exec_actions(parsed, commenter_map, main_acc, shuffle_label=""):
+    """parsed 시나리오 → 실행용 actions 생성 + 계정 셔플.
+
+    텍스트 파일의 댓글 순서는 그대로 유지하되, 역할번호(댓글1/댓글2/...)를
+    실제 commenter 계정에 랜덤 배정한다. 같은 역할번호는 같은 계정으로 매핑 유지
+    → 대댓글 대화 일관성 보존. to_index도 원본 그대로 유지.
+
+    Returns: (exec_actions, error_message_or_None)
+    """
+    needed_nums = list(parsed["commenter_nums"])
+    available = list(commenter_map.keys())
+    if len(available) < len(needed_nums):
+        return None, f"commenter 계정 부족: 필요 {len(needed_nums)}개 / 보유 {len(available)}개"
+
+    # 역할번호 → 실제 계정 랜덤 매핑
+    picked = random.sample(available, len(needed_nums))
+    role_to_account = {
+        role: commenter_map[picked[i]]
+        for i, role in enumerate(needed_nums)
+    }
+
+    # 원본 순서 그대로 exec_actions 생성 (계정만 셔플된 매핑 사용)
+    exec_actions = []
+    for act in parsed["actions"]:
+        if act["action"] == "comment":
+            acc = role_to_account.get(act["commenter_num"])
+            if not acc:
+                return None, f"댓글 {act['commenter_num']} 계정이 등록되지 않음"
+            exec_actions.append({"action": "comment", "account": acc, "text": act["text"]})
+        elif act["action"] == "reply":
+            if act.get("is_main"):
+                acc = main_acc
+            else:
+                acc = role_to_account.get(act["commenter_num"])
+                if not acc:
+                    return None, f"ㄴ 댓글 {act['commenter_num']} 계정이 등록되지 않음"
+            exec_actions.append({
+                "action": "reply", "account": acc,
+                "to_index": act["to_index"], "text": act["text"],
+            })
+
+    # 디버그용 요약
+    mapping_summary = ", ".join(
+        f"역할{role}→{role_to_account[role].get('id','?')}"
+        for role in needed_nums
+    )
+    ts = time.strftime("%H:%M:%S")
+    log_queue.put({
+        "type": "log", "time": ts,
+        "message": f"[계정셔플{shuffle_label}] {mapping_summary}",
+    })
+
+    return exec_actions, None
+
+
 @app.route("/api/scenario/parse", methods=["POST"])
 def parse_scenario():
     """업로드된 txt 파일을 파싱해 프리뷰 반환"""
@@ -287,25 +343,10 @@ def run_scenario():
         if m:
             commenter_map[int(m.group())] = c
 
-    # 시나리오 actions → 실행용 actions (계정 붙이기)
-    exec_actions = []
-    for act in parsed["actions"]:
-        if act["action"] == "comment":
-            acc = commenter_map.get(act["commenter_num"])
-            if not acc:
-                return jsonify({"error": f"댓글 {act['commenter_num']} 계정이 등록되지 않음"}), 400
-            exec_actions.append({"action": "comment", "account": acc, "text": act["text"]})
-        elif act["action"] == "reply":
-            if act.get("is_main"):
-                acc = main_acc
-            else:
-                acc = commenter_map.get(act["commenter_num"])
-                if not acc:
-                    return jsonify({"error": f"ㄴ 댓글 {act['commenter_num']} 계정이 등록되지 않음"}), 400
-            exec_actions.append({
-                "action": "reply", "account": acc,
-                "to_index": act["to_index"], "text": act["text"]
-            })
+    # 시나리오 actions → 실행용 actions (계정 셔플 + 그룹 순서 셔플)
+    exec_actions, err = build_shuffled_exec_actions(parsed, commenter_map, main_acc)
+    if err:
+        return jsonify({"error": err}), 400
 
     task = {
         "mode": "new",
@@ -418,25 +459,12 @@ def run_queue():
             f.save(path)
             image_map[num] = path
 
-        # 시나리오 actions → 실행용 (계정 붙이기)
-        exec_actions = []
-        for act in parsed["actions"]:
-            if act["action"] == "comment":
-                acc = commenter_map.get(act["commenter_num"])
-                if not acc:
-                    return jsonify({"error": f"작업 #{i+1}: 댓글 {act['commenter_num']} 계정 미등록"}), 400
-                exec_actions.append({"action": "comment", "account": acc, "text": act["text"]})
-            elif act["action"] == "reply":
-                if act.get("is_main"):
-                    acc = main_acc
-                else:
-                    acc = commenter_map.get(act["commenter_num"])
-                    if not acc:
-                        return jsonify({"error": f"작업 #{i+1}: ㄴ 댓글 {act['commenter_num']} 계정 미등록"}), 400
-                exec_actions.append({
-                    "action": "reply", "account": acc,
-                    "to_index": act["to_index"], "text": act["text"]
-                })
+        # 시나리오 actions → 실행용 (계정 셔플 + 그룹 순서 셔플, 글마다 독립 재셔플)
+        exec_actions, err = build_shuffled_exec_actions(
+            parsed, commenter_map, main_acc, shuffle_label=f" 글{i+1}"
+        )
+        if err:
+            return jsonify({"error": f"작업 #{i+1}: {err}"}), 400
 
         tasks.append({
             "mode": mode,
