@@ -213,3 +213,46 @@ async def run_task(task, log_fn, stop_event=None):
     except Exception as e:
         log_fn(f"❌ 작업 오류: {str(e)}")
         return {"success": False, "error": str(e)}
+
+
+async def run_batch(tasks, log_fn, stop_event=None):
+    """여러 task 를 순차 실행.
+
+    각 task 는 run_task 와 동일한 스키마.
+    한 작업 실패해도 다음 작업 계속 진행 (전체 중단은 stop_event 로만).
+    """
+    results = []
+    total = len(tasks)
+    log_fn(f"═════ 배치 시작: 총 {total}개 작업 ═════")
+
+    for i, task in enumerate(tasks, 1):
+        if stop_event and stop_event.is_set():
+            log_fn("⚠ 배치 중단 요청 — 남은 작업 건너뜀")
+            break
+
+        title_preview = (task.get("title") or "")[:30]
+        log_fn("")
+        log_fn(f"╔═══ [작업 {i}/{total}] {title_preview} ═══╗")
+
+        try:
+            result = await run_task(task, log_fn, stop_event)
+        except Exception as e:
+            log_fn(f"❌ 작업 {i} 예외: {e}")
+            result = {"success": False, "error": str(e)}
+
+        results.append({"index": i, "title": title_preview, **result})
+
+        if result.get("success"):
+            log_fn(f"✓ 작업 {i}/{total} 완료")
+        else:
+            log_fn(f"✗ 작업 {i}/{total} 실패: {result.get('error', '')} — 다음 작업 계속")
+
+    ok_count = sum(1 for r in results if r.get("success"))
+    log_fn("")
+    log_fn(f"═════ 배치 종료: 성공 {ok_count}/{total} ═════")
+    return {
+        "success": ok_count == total,
+        "total": total,
+        "succeeded": ok_count,
+        "results": results,
+    }

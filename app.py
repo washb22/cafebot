@@ -344,6 +344,131 @@ def run_scenario():
     return jsonify({"success": True, "message": f"시나리오 실행 시작 ({len(exec_actions)}개 액션)"})
 
 
+@app.route("/api/queue/run", methods=["POST"])
+def run_queue():
+    """여러 시나리오를 한 번에 받아 순차 실행.
+
+    multipart/form-data:
+        count=<N>
+        s0_text, s0_cafe_url, s0_main_id, s0_board_name, s0_image_1, s0_image_2, ...
+        s1_text, ...
+    """
+    global task_running
+    if task_running:
+        return jsonify({"error": "이미 작업이 실행 중입니다"}), 400
+
+    from modules.txt_parser import parse_scenario_text
+
+    try:
+        count = int(request.form.get("count", "0"))
+    except ValueError:
+        count = 0
+    if count <= 0:
+        return jsonify({"error": "큐에 작업이 없습니다"}), 400
+
+    accounts = load_accounts()
+    commenter_map = {}
+    for c in accounts.get("commenters", []):
+        label = c.get("label", "")
+        m = re.search(r'\d+', label)
+        if m:
+            commenter_map[int(m.group())] = c
+
+    tasks = []
+    for i in range(count):
+        prefix = f"s{i}_"
+        raw_text = request.form.get(prefix + "text", "")
+        cafe_url = request.form.get(prefix + "cafe_url", "").strip()
+        main_id = request.form.get(prefix + "main_id", "").strip()
+        board_name = request.form.get(prefix + "board_name", "").strip()
+
+        if not raw_text or not cafe_url or not main_id:
+            return jsonify({"error": f"작업 #{i+1}: text/cafe_url/main_id 누락"}), 400
+
+        try:
+            parsed = parse_scenario_text(raw_text)
+        except Exception as e:
+            return jsonify({"error": f"작업 #{i+1} 파싱 오류: {e}"}), 400
+
+        main_acc = _resolve_main(accounts, main_id)
+        if not main_acc:
+            return jsonify({"error": f"작업 #{i+1}: 글 작성자 '{main_id}' 없음"}), 400
+
+        # 이미지 파일 저장
+        image_map = {}
+        for key, f in request.files.items():
+            if not key.startswith(prefix + "image_"):
+                continue
+            try:
+                num = int(key[len(prefix) + len("image_"):])
+            except ValueError:
+                continue
+            if not f or not f.filename:
+                continue
+            safe = secure_filename(f.filename) or f"img{num}.jpg"
+            ts = str(int(time.time() * 1000))
+            fname = f"{ts}_q{i}_{num}_{safe}"
+            path = os.path.join(UPLOAD_DIR, fname)
+            f.save(path)
+            image_map[num] = path
+
+        # 시나리오 actions → 실행용 (계정 붙이기)
+        exec_actions = []
+        for act in parsed["actions"]:
+            if act["action"] == "comment":
+                acc = commenter_map.get(act["commenter_num"])
+                if not acc:
+                    return jsonify({"error": f"작업 #{i+1}: 댓글 {act['commenter_num']} 계정 미등록"}), 400
+                exec_actions.append({"action": "comment", "account": acc, "text": act["text"]})
+            elif act["action"] == "reply":
+                if act.get("is_main"):
+                    acc = main_acc
+                else:
+                    acc = commenter_map.get(act["commenter_num"])
+                    if not acc:
+                        return jsonify({"error": f"작업 #{i+1}: ㄴ 댓글 {act['commenter_num']} 계정 미등록"}), 400
+                exec_actions.append({
+                    "action": "reply", "account": acc,
+                    "to_index": act["to_index"], "text": act["text"]
+                })
+
+        tasks.append({
+            "mode": "new",
+            "cafe_url": cafe_url,
+            "board_name": board_name,
+            "title": parsed["title"],
+            "body": parsed["body"],
+            "main_account": main_acc,
+            "comments": [],
+            "replies": [],
+            "scenario": exec_actions,
+            "image_map": image_map,
+        })
+
+    stop_event.clear()
+    task_running = True
+
+    def log_fn(msg):
+        ts = time.strftime("%H:%M:%S")
+        log_queue.put({"type": "log", "time": ts, "message": msg})
+
+    def run_in_thread():
+        global task_running
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            from modules.task_runner import run_batch
+            result = loop.run_until_complete(run_batch(tasks, log_fn, stop_event))
+            log_queue.put({"type": "done", "result": result})
+        except Exception as e:
+            log_queue.put({"type": "error", "message": str(e)})
+        finally:
+            task_running = False
+
+    threading.Thread(target=run_in_thread, daemon=True).start()
+    return jsonify({"success": True, "message": f"배치 시작: {count}개 작업"})
+
+
 @app.route("/api/tasks/stop", methods=["POST"])
 def stop_task():
     global task_running

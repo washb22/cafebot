@@ -120,34 +120,42 @@
       </div>
     </div>
 
-    <!-- TXT 파일 업로드 (시나리오 모드) -->
+    <!-- TXT 파일 배치 큐 -->
     <div class="section" style="border:2px solid #ffc107;background:rgba(255,193,7,0.05)">
-      <div class="section-title">📄 TXT 파일 자동 실행</div>
+      <div class="section-title">📄 TXT 파일 배치 실행 (여러 글 연속 등록)</div>
       <p style="font-size:12px;color:var(--muted);margin-bottom:10px">
-        <code>제목:</code>, <code>---</code>, 본문, <code>---</code>, <code>댓글1:</code>, <code>ㄴ 작성자:</code>, <code>ㄴ 댓글2:</code> 형식 파일 업로드
+        포맷: <code>제목:</code>, <code>---</code>, 본문, <code>---</code>, <code>댓글1:</code>, <code>ㄴ 작성자:</code>, <code>ㄴ 댓글2:</code>
+        본문에 <code>[이미지1]</code> 마커 가능
       </p>
-      <div class="form-row">
-        <div class="form-label">파일</div>
-        <input type="file" id="scenarioFile" accept=".txt" class="form-input" onchange="previewScenario()">
+
+      <!-- 큐 목록 -->
+      <div id="queueList" style="margin-bottom:12px"></div>
+
+      <!-- 새 작업 추가 폼 -->
+      <div style="background:rgba(0,0,0,0.15);border:1px dashed var(--border);border-radius:8px;padding:12px">
+        <div style="font-size:12px;font-weight:700;color:var(--accent);margin-bottom:10px">+ 새 작업 추가</div>
+        <div class="form-row">
+          <div class="form-label">파일</div>
+          <input type="file" id="scenarioFile" accept=".txt" class="form-input" onchange="previewScenario()">
+        </div>
+        <div class="form-row">
+          <div class="form-label">글 작성자</div>
+          <select id="scenarioMainId" class="form-input"></select>
+        </div>
+        <div class="form-row">
+          <div class="form-label">카페 URL</div>
+          <input id="scenarioCafeUrl" class="form-input" placeholder="글쓰기 화면 URL (articles/write 포함)">
+        </div>
+        <div class="form-row">
+          <div class="form-label">게시판</div>
+          <input id="scenarioBoardName" class="form-input" placeholder="선택사항">
+        </div>
+        <div id="scenarioImageSlots"></div>
+        <div id="scenarioPreview" style="display:none;margin-top:8px;padding:8px;background:rgba(0,0,0,0.2);border-radius:6px;font-size:12px"></div>
+        <button id="btnAddToQueue" class="btn btn-outline" style="margin-top:10px;width:100%" onclick="addToQueue()" disabled>➕ 작업 목록에 추가</button>
       </div>
-      <div class="form-row">
-        <div class="form-label">글 작성자</div>
-        <select id="scenarioMainId" class="form-input"></select>
-      </div>
-      <div class="form-row">
-        <div class="form-label">카페 URL</div>
-        <input id="scenarioCafeUrl" class="form-input" placeholder="글쓰기 화면 URL 직접 붙여넣기 권장 (articles/write 포함)">
-      </div>
-      <div style="font-size:11px;color:var(--muted);margin:-8px 0 10px 0;padding-left:72px">
-        💡 본문에 <code>[이미지1]</code> 마커 넣으면 아래에 업로드 슬롯이 자동 생성됩니다
-      </div>
-      <div class="form-row">
-        <div class="form-label">게시판</div>
-        <input id="scenarioBoardName" class="form-input" placeholder="게시판 이름 (선택사항)">
-      </div>
-      <div id="scenarioImageSlots" style="margin-top:10px"></div>
-      <div id="scenarioPreview" style="display:none;margin-top:10px;padding:10px;background:rgba(0,0,0,0.2);border-radius:6px;font-size:12px"></div>
-      <button id="btnScenarioRun" class="btn btn-primary" style="margin-top:10px;width:100%" onclick="runScenario()" disabled>📤 파일로 시나리오 실행</button>
+
+      <button id="btnQueueRun" class="btn btn-primary" style="margin-top:10px;width:100%;padding:12px;font-size:14px" onclick="runQueue()" disabled>▶ 전체 실행 (0개)</button>
     </div>
 
     <!-- Task Mode -->
@@ -249,7 +257,9 @@
 let accounts = { mains: [], commenters: [] };
 let taskMode = 'new';
 let eventSource = null;
-let scenarioImageNums = [];  // 파싱에서 발견된 이미지 번호 목록
+let scenarioImageNums = [];  // 현재 폼에서 파싱한 이미지 번호 목록
+let scenarioParsed = null;   // 현재 폼에서 파싱된 결과 (addToQueue 용)
+let queue = [];              // 배치 큐 — 각 항목: { file, text, parsed, main_id, cafe_url, board_name, image_nums, images: {num: File} }
 
 // ── Init ──
 async function init() {
@@ -257,6 +267,7 @@ async function init() {
   checkAdb();
   setInterval(checkAdb, 30000);
   connectSSE();
+  renderQueue();
 }
 
 // ── SSE ──
@@ -436,10 +447,11 @@ let scenarioText = "";
 async function previewScenario() {
   const file = document.getElementById('scenarioFile').files[0];
   const preview = document.getElementById('scenarioPreview');
-  const btn = document.getElementById('btnScenarioRun');
+  const btn = document.getElementById('btnAddToQueue');
   if (!file) {
     preview.style.display = 'none';
     btn.disabled = true;
+    scenarioParsed = null;
     return;
   }
   scenarioText = await file.text();
@@ -473,12 +485,14 @@ async function previewScenario() {
     `;
     preview.style.display = 'block';
     scenarioImageNums = imgNums;
+    scenarioParsed = data;
     renderImageSlots();
     btn.disabled = data.missing_nums.length > 0;
   } catch (e) {
     preview.innerHTML = `<span style="color:#dc3545">업로드 오류: ${e}</span>`;
     preview.style.display = 'block';
     btn.disabled = true;
+    scenarioParsed = null;
   }
 }
 
@@ -497,16 +511,53 @@ function renderImageSlots() {
     `).join('');
 }
 
-async function runScenario() {
+function renderQueue() {
+  const list = document.getElementById('queueList');
+  const runBtn = document.getElementById('btnQueueRun');
+
+  if (queue.length === 0) {
+    list.innerHTML = '<div style="font-size:12px;color:var(--muted);text-align:center;padding:8px">아직 등록된 작업이 없습니다</div>';
+    runBtn.disabled = true;
+    runBtn.textContent = '▶ 전체 실행 (0개)';
+    return;
+  }
+
+  list.innerHTML = queue.map((item, i) => {
+    const imgCount = Object.keys(item.images).length;
+    const title = (item.parsed?.title || '제목없음').substring(0, 30);
+    const mainLabel = (accounts.mains.find(m => m.id === item.main_id) || {}).label || item.main_id;
+    const commentCount = (item.parsed?.actions || []).filter(a => a.action === 'comment').length;
+    const replyCount = (item.parsed?.actions || []).filter(a => a.action === 'reply').length;
+    return `
+      <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:6px">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
+          <div style="flex:1;min-width:0">
+            <div style="font-size:12px;font-weight:700;color:var(--accent);margin-bottom:4px">#${i+1} · ${mainLabel}</div>
+            <div style="font-size:13px;font-weight:600;margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escHtml(title)}</div>
+            <div style="font-size:11px;color:var(--muted)">댓글 ${commentCount} · 대댓글 ${replyCount}${imgCount ? ` · 📷 ${imgCount}` : ''}</div>
+            <div style="font-size:10px;color:var(--muted);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escHtml(item.cafe_url)}</div>
+          </div>
+          <button class="btn btn-danger btn-sm" onclick="removeFromQueue(${i})">×</button>
+        </div>
+      </div>`;
+  }).join('');
+
+  runBtn.disabled = false;
+  runBtn.textContent = `▶ 전체 실행 (${queue.length}개)`;
+}
+
+function addToQueue() {
   const cafeUrl = document.getElementById('scenarioCafeUrl').value.trim();
   const mainId = document.getElementById('scenarioMainId').value;
-  if (!cafeUrl) { alert('카페 URL을 입력해주세요'); return; }
-  if (!scenarioText) { alert('파일을 먼저 선택해주세요'); return; }
-  if (!mainId) { alert('글 작성자를 등록/선택해주세요'); return; }
+  const boardName = document.getElementById('scenarioBoardName').value.trim();
 
-  // 이미지 업로드 검증
+  if (!scenarioParsed) { alert('TXT 파일을 먼저 업로드하고 파싱해주세요'); return; }
+  if (!cafeUrl) { alert('카페 URL을 입력해주세요'); return; }
+  if (!mainId) { alert('글 작성자를 선택해주세요'); return; }
+
+  // 이미지 검증
   const imageInputs = document.querySelectorAll('.scenario-image');
-  const imageFiles = {};
+  const images = {};
   for (const inp of imageInputs) {
     const num = inp.dataset.num;
     const f = inp.files[0];
@@ -514,26 +565,68 @@ async function runScenario() {
       alert(`[이미지${num}] 파일을 선택해주세요`);
       return;
     }
-    imageFiles[num] = f;
+    images[num] = f;
   }
 
-  if (!confirm('시나리오를 실행하시겠습니까?\n진행 중 중단 버튼으로 멈출 수 있습니다.')) return;
+  queue.push({
+    text: scenarioText,
+    parsed: scenarioParsed,
+    main_id: mainId,
+    cafe_url: cafeUrl,
+    board_name: boardName,
+    images: images,
+  });
+
+  // 폼 리셋 (글작성자/카페URL은 유지하면 반복 등록 편함 → 파일과 게시판만 리셋? 일단 전부 리셋)
+  document.getElementById('scenarioFile').value = '';
+  document.getElementById('scenarioCafeUrl').value = '';
+  document.getElementById('scenarioBoardName').value = '';
+  document.getElementById('scenarioPreview').style.display = 'none';
+  document.getElementById('scenarioImageSlots').innerHTML = '';
+  document.getElementById('btnAddToQueue').disabled = true;
+  scenarioText = '';
+  scenarioParsed = null;
+  scenarioImageNums = [];
+
+  renderQueue();
+}
+
+function removeFromQueue(idx) {
+  queue.splice(idx, 1);
+  renderQueue();
+}
+
+async function runQueue() {
+  if (queue.length === 0) { alert('큐에 작업이 없습니다'); return; }
+  if (!confirm(`${queue.length}개 작업을 순차 실행합니다.\n중간에 중단 버튼으로 멈출 수 있습니다.\n계속할까요?`)) return;
 
   const fd = new FormData();
-  fd.append('text', scenarioText);
-  fd.append('cafe_url', cafeUrl);
-  fd.append('main_id', mainId);
-  fd.append('board_name', document.getElementById('scenarioBoardName').value.trim());
-  Object.entries(imageFiles).forEach(([num, f]) => fd.append(`image_${num}`, f));
+  fd.append('count', queue.length);
+  queue.forEach((item, i) => {
+    fd.append(`s${i}_text`, item.text);
+    fd.append(`s${i}_cafe_url`, item.cafe_url);
+    fd.append(`s${i}_main_id`, item.main_id);
+    fd.append(`s${i}_board_name`, item.board_name || '');
+    Object.entries(item.images).forEach(([num, f]) => {
+      fd.append(`s${i}_image_${num}`, f);
+    });
+  });
 
-  const res = await fetch('/api/scenario/run', { method: 'POST', body: fd });
-  const data = await res.json();
-  if (data.error) {
-    alert('오류: ' + data.error);
-  } else {
-    alert(data.message || '시작됨');
+  try {
+    const res = await fetch('/api/queue/run', { method: 'POST', body: fd });
+    const data = await res.json();
+    if (data.error) {
+      alert('오류: ' + data.error);
+      return;
+    }
+    addLog('--:--:--', data.message || '배치 시작');
     document.getElementById('btnRun').disabled = true;
     document.getElementById('btnStop').disabled = false;
+    // 큐는 성공적으로 서버에 제출되었으니 비워줌
+    queue = [];
+    renderQueue();
+  } catch (e) {
+    alert('요청 오류: ' + e.message);
   }
 }
 
