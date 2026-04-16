@@ -86,7 +86,10 @@ async def run_task(task, log_fn, stop_event=None):
                     return {"success": False, "error": "글 작성 실패"}
             else:
                 post_url = task["post_url"]
-                result = await edit_post(page, post_url, task["title"], task["body"], log_fn)
+                result = await edit_post(
+                    page, post_url, task["title"], task["body"], log_fn,
+                    image_map=task.get("image_map"),
+                )
                 if not result:
                     log_fn("❌ 글 수정 실패 - 작업 중단")
                     return {"success": False, "error": "글 수정 실패"}

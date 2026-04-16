@@ -378,12 +378,18 @@ def run_queue():
     for i in range(count):
         prefix = f"s{i}_"
         raw_text = request.form.get(prefix + "text", "")
+        mode = request.form.get(prefix + "mode", "new").strip() or "new"
         cafe_url = request.form.get(prefix + "cafe_url", "").strip()
+        post_url_field = request.form.get(prefix + "post_url", "").strip()
         main_id = request.form.get(prefix + "main_id", "").strip()
         board_name = request.form.get(prefix + "board_name", "").strip()
 
-        if not raw_text or not cafe_url or not main_id:
-            return jsonify({"error": f"작업 #{i+1}: text/cafe_url/main_id 누락"}), 400
+        if not raw_text or not main_id:
+            return jsonify({"error": f"작업 #{i+1}: text/main_id 누락"}), 400
+        if mode == "new" and not cafe_url:
+            return jsonify({"error": f"작업 #{i+1}: 새 글 작성은 카페 URL 필요"}), 400
+        if mode == "edit" and not post_url_field:
+            return jsonify({"error": f"작업 #{i+1}: 수정 모드는 기존 글 URL 필요"}), 400
 
         try:
             parsed = parse_scenario_text(raw_text)
@@ -433,8 +439,9 @@ def run_queue():
                 })
 
         tasks.append({
-            "mode": "new",
+            "mode": mode,
             "cafe_url": cafe_url,
+            "post_url": post_url_field,
             "board_name": board_name,
             "title": parsed["title"],
             "body": parsed["body"],

@@ -317,17 +317,210 @@ async def write_post(page, cafe_url, title, body, board_name=None, log_fn=None, 
         return None
 
 
-async def edit_post(page, post_url, title, body, log_fn=None):
-    """Edit an existing post — 기존 로직 유지 (거의 미사용)"""
+async def _resolve_edit_url(page, post_url, log_fn=None):
+    """post_url 방문 후 cafe_main iframe URL 에서 cafe_id 추출 →
+    수정 URL (`/ca-fe/cafes/{cafe_id}/articles/write?articleid={article_id}`) 반환."""
     def log(msg):
         if log_fn:
             log_fn(msg)
+
     try:
-        log(f"글 수정 페이지 이동: {post_url}")
         await page.goto(post_url, wait_until="domcontentloaded", timeout=30000)
-        await human_delay(2, 3)
-        log("⚠ 수정 모드는 아직 업데이트되지 않음")
+    except Exception as e:
+        log(f"post_url 이동 타임아웃(무시): {e}")
+    await human_delay(3, 5)
+
+    # article_id: URL 끝에서 추출
+    m = re.search(r'/(\d+)(?:\?|$|#)', post_url)
+    if not m:
+        # oldPath 안에 articleid 가 있을 수도
+        m = re.search(r'articleid[=]?(\d+)', post_url)
+    if not m:
+        log(f"⚠ post_url 에서 article_id 추출 실패: {post_url}")
         return None
+    article_id = m.group(1)
+
+    # cafe_id: cafe_main iframe URL 에서 추출
+    cafe_id = None
+    for _ in range(10):
+        for f in page.frames:
+            if f.name == "cafe_main":
+                mm = re.search(r'/cafes/(\d+)/', f.url or "")
+                if mm:
+                    cafe_id = mm.group(1)
+                    break
+        if cafe_id:
+            break
+        await asyncio.sleep(1)
+
+    if not cafe_id:
+        log("⚠ cafe_main iframe 에서 cafe_id 추출 실패")
+        return None
+
+    return f"https://cafe.naver.com/ca-fe/cafes/{cafe_id}/articles/{article_id}/modify"
+
+
+async def edit_post(page, post_url, title, body, log_fn=None, image_map=None):
+    """기존 글 수정.
+
+    제목/본문을 새 값으로 덮어씀. 이미지 마커 지원.
+    기존 댓글/대댓글은 건드리지 않음 (별도 scenario 단계로 추가).
+    """
+    def log(msg):
+        if log_fn:
+            log_fn(msg)
+
+    try:
+        page.on("dialog", lambda d: asyncio.create_task(d.dismiss()))
+
+        # post_url 이 이미 /modify 형태면 바로 사용, 아니면 변환
+        if "/modify" in post_url:
+            edit_url = post_url
+        else:
+            log(f"수정 URL 확인을 위해 post_url 방문: {post_url}")
+            edit_url = await _resolve_edit_url(page, post_url, log_fn)
+            if not edit_url:
+                log("❌ 수정 URL 을 구성할 수 없음")
+                return None
+
+        log(f"수정 페이지 이동: {edit_url}")
+        try:
+            await page.goto(edit_url, wait_until="domcontentloaded", timeout=30000)
+        except Exception as e:
+            log(f"이동 타임아웃(무시): {e}")
+        await human_delay(3, 5)
+
+        frames_list = lambda: [page] + list(page.frames)
+
+        # 제목 textarea 로딩 대기 (기존 제목이 채워질 때까지)
+        log("제목 textarea 로딩 대기...")
+        title_el = None
+        title_frame = None
+        for _ in range(15):
+            for t in frames_list():
+                try:
+                    tas = await t.query_selector_all(
+                        'textarea[placeholder*="제목"], textarea.textarea_input'
+                    )
+                    for ta in tas:
+                        box = await ta.bounding_box()
+                        if box and box["width"] > 100:
+                            val = await ta.evaluate("e => e.value")
+                            if val:  # 기존 제목이 들어왔음
+                                title_el = ta
+                                title_frame = t
+                                break
+                    if title_el:
+                        break
+                except Exception:
+                    pass
+            if title_el:
+                break
+            await asyncio.sleep(1)
+
+        if not title_el:
+            log("⚠ 제목 textarea 를 찾지 못함 또는 기존 제목 미로드")
+            try:
+                import os as _os
+                _path = _os.path.join(_os.path.dirname(__file__), "..", "debug_edit_no_title.png")
+                await page.screenshot(path=_path, full_page=True)
+                log(f"   디버그 스크린샷: {_path}")
+            except Exception:
+                pass
+            return None
+
+        log("제목 clear + 새 제목 입력...")
+        await title_el.click()
+        await human_delay(0.3, 0.6)
+        # select all → delete
+        await page.keyboard.press("Control+A")
+        await human_delay(0.1, 0.3)
+        await page.keyboard.press("Delete")
+        await human_delay(0.2, 0.4)
+        await page.keyboard.type(title, delay=random.randint(15, 50))
+        await human_delay(0.3, 0.7)
+
+        # 본문 SmartEditor 로딩 대기 — write_post 와 동일한 탐색 방식
+        log("본문 에디터 로딩 대기...")
+        body_el, body_frame = await _find_visible(
+            frames_list(),
+            [
+                '.se-component-content .se-text-paragraph',
+                '.se-text-paragraph',
+                'p.se-text-paragraph-align-left',
+            ],
+            min_w=100, min_h=15, max_wait=15,
+        )
+
+        if not body_el:
+            log("⚠ 본문 paragraph 를 찾지 못함")
+            return None
+
+        log("본문 clear + 새 본문 입력...")
+        await body_el.click()
+        await human_delay(0.3, 0.6)
+        # 본문 전체 선택 + 삭제
+        await page.keyboard.press("Control+A")
+        await human_delay(0.1, 0.3)
+        await page.keyboard.press("Delete")
+        await human_delay(0.3, 0.6)
+
+        if image_map and re.search(r'\[이미지\d+\]', body):
+            log("본문 입력 (이미지 마커 포함)...")
+            await _type_body_with_images(page, body_el, body, image_map, log_fn)
+        else:
+            lines = body.split("\n")
+            for i, line in enumerate(lines):
+                if line.strip():
+                    await page.keyboard.type(line, delay=random.randint(15, 50))
+                if i < len(lines) - 1:
+                    await page.keyboard.press("Enter")
+                    await human_delay(0.05, 0.15)
+        await human_delay(0.5, 1.2)
+
+        # 등록 버튼 (write_post 와 동일 — 수정 모드에서도 '등록' 텍스트)
+        log("등록 버튼 탐색...")
+        pub_el = None
+        for t in frames_list():
+            try:
+                els = await t.query_selector_all('a, button')
+                for b in els:
+                    try:
+                        txt = (await b.text_content() or '').strip()
+                        if txt == '등록':
+                            box = await b.bounding_box()
+                            if box and box['width'] > 10 and box['x'] > 0 and box['y'] > 0:
+                                pub_el = b
+                                break
+                    except Exception:
+                        pass
+                if pub_el:
+                    break
+            except Exception:
+                pass
+
+        if not pub_el:
+            log("⚠ 등록 버튼을 찾을 수 없음")
+            return None
+
+        log("수정 발행 중...")
+        await pub_el.click()
+
+        # URL 이동 확인 (write 페이지에서 벗어나야 함)
+        for _ in range(15):
+            await asyncio.sleep(1)
+            current = page.url
+            if "/articles/write" not in current and "ArticleWrite" not in current:
+                break
+
+        final_url = page.url
+        if "/articles/write" in final_url:
+            log(f"⚠ 발행 후에도 write URL: {final_url}")
+            return None
+
+        log(f"글 수정 완료: {final_url}")
+        return final_url
+
     except Exception as e:
         log(f"글 수정 오류: {str(e)}")
         return None
