@@ -330,6 +330,12 @@ async def _resolve_edit_url(page, post_url, log_fn=None):
         log(f"post_url 이동 타임아웃(무시): {e}")
     await human_delay(3, 5)
 
+    # 단축 URL(naver.me 등) 리다이렉트 후 실제 URL 사용
+    resolved_url = page.url
+    if resolved_url and resolved_url != post_url:
+        log(f"URL 리다이렉트 감지: {post_url} → {resolved_url}")
+        post_url = resolved_url
+
     # article_id: URL 끝에서 추출
     m = re.search(r'/(\d+)(?:\?|$|#)', post_url)
     if not m:
