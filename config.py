@@ -1,10 +1,20 @@
 """CafeBot Configuration"""
 import os
+import sys
+
+# frozen (PyInstaller) 모드에서는 exe 위치 기준, 개발 모드에서는 소스 위치 기준
+if getattr(sys, 'frozen', False):
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 FLASK_PORT = 5002
-DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+DATA_DIR = os.path.join(BASE_DIR, "data")
 ACCOUNTS_FILE = os.path.join(DATA_DIR, "accounts.json")
-LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
+LOG_DIR = os.path.join(BASE_DIR, "logs")
+ADB_PATH = os.path.join(BASE_DIR, "adb", "adb.exe")
+if not os.path.exists(ADB_PATH):
+    ADB_PATH = "adb"
 
 # Delay ranges (seconds) - min, max
 DEFAULT_DELAYS = {

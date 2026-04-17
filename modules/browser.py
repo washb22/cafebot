@@ -1,7 +1,14 @@
 """Playwright incognito browser session manager."""
+import os
+import sys
 import random
 from contextlib import asynccontextmanager
 from playwright.async_api import async_playwright
+
+if getattr(sys, 'frozen', False) and 'PLAYWRIGHT_BROWSERS_PATH' not in os.environ:
+    os.environ['PLAYWRIGHT_BROWSERS_PATH'] = os.path.join(
+        os.path.dirname(sys.executable), 'browsers'
+    )
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",

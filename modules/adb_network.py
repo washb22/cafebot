@@ -3,12 +3,13 @@ import subprocess
 import asyncio
 import requests
 import time
+from config import ADB_PATH
 
 
 def run_adb(cmd: str) -> str:
     """Run an ADB command and return output."""
     result = subprocess.run(
-        f"adb {cmd}",
+        f'"{ADB_PATH}" {cmd}',
         shell=True, capture_output=True, text=True, timeout=10
     )
     return result.stdout.strip()

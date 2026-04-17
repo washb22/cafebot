@@ -141,6 +141,21 @@
     box-shadow:0 2px 10px rgba(124,111,255,.4); display:none; z-index:10; }
   .scroll-indicator.show { display:block; }
   .log-panel { position:relative; }
+
+  /* ── License Modal ── */
+  .modal-overlay { position:fixed; inset:0; background:rgba(0,0,0,.7); z-index:1000; display:flex;
+    align-items:center; justify-content:center; }
+  .modal { background:var(--surface); border:1px solid var(--border); border-radius:16px; padding:32px;
+    width:420px; max-width:90vw; text-align:center; }
+  .modal h2 { font-size:18px; margin-bottom:8px; }
+  .modal p { font-size:13px; color:var(--muted); margin-bottom:20px; }
+  .modal input { width:100%; padding:12px; font-size:14px; border-radius:8px; border:1px solid var(--border);
+    background:var(--surface2); color:var(--text); outline:none; text-align:center; letter-spacing:2px; margin-bottom:12px; }
+  .modal input:focus { border-color:var(--accent); }
+  .modal .error-msg { color:var(--danger); font-size:12px; margin-bottom:8px; min-height:18px; }
+  .license-badge { font-size:11px; padding:3px 8px; border-radius:10px; font-weight:600; }
+  .license-badge.valid { background:rgba(74,222,128,.15); color:var(--success); }
+  .license-badge.invalid { background:rgba(248,113,113,.15); color:var(--danger); cursor:pointer; }
 </style>
 </head>
 <body>
@@ -150,8 +165,20 @@
   <div class="nav-status">
     <span>ADB: <span class="status-dot" id="adbDot"></span> <span id="adbText">확인 중</span></span>
     <span>IP: <span id="currentIp">-</span></span>
+    <span id="licenseBadge" class="license-badge" onclick="showLicenseModal()" style="display:none"></span>
   </div>
 </nav>
+
+<!-- License Activation Modal -->
+<div id="licenseModal" class="modal-overlay" style="display:none">
+  <div class="modal">
+    <h2>CafeBot 라이선스 인증</h2>
+    <p>라이선스 키를 입력해주세요</p>
+    <input id="licenseKeyInput" type="text" placeholder="XXXX-XXXX-XXXX-XXXX" maxlength="30">
+    <div class="error-msg" id="licenseError"></div>
+    <button class="btn btn-primary" style="width:100%;padding:12px;font-size:14px" onclick="activateLicense()">인증하기</button>
+  </div>
+</div>
 
 <div class="layout">
   <!-- Left: Task Setup -->
@@ -348,12 +375,63 @@ let queue = [];              // 배치 큐 — 각 항목: { mode, file, text, p
 
 // ── Init ──
 async function init() {
+  await checkLicense();
   await loadAccounts();
   checkAdb();
   setInterval(checkAdb, 30000);
   connectSSE();
   renderQueue();
   setupScrollListener();
+}
+
+// ── License ──
+async function checkLicense() {
+  try {
+    const res = await fetch('/api/license/status');
+    const data = await res.json();
+    const badge = document.getElementById('licenseBadge');
+    badge.style.display = 'inline';
+    if (data.valid) {
+      badge.className = 'license-badge valid';
+      badge.textContent = `D-${data.days_remaining}`;
+      badge.title = `라이선스 잔여 ${data.days_remaining}일`;
+    } else {
+      badge.className = 'license-badge invalid';
+      badge.textContent = '미인증';
+      badge.title = data.error || '라이선스 인증 필요';
+      showLicenseModal();
+    }
+  } catch(e) {
+    // 라이선스 서버 미연결 시 무시 (개발 모드)
+  }
+}
+
+function showLicenseModal() {
+  document.getElementById('licenseModal').style.display = 'flex';
+  document.getElementById('licenseKeyInput').focus();
+}
+
+async function activateLicense() {
+  const key = document.getElementById('licenseKeyInput').value.trim();
+  const errEl = document.getElementById('licenseError');
+  if (!key) { errEl.textContent = '키를 입력해주세요'; return; }
+  errEl.textContent = '인증 중...';
+  try {
+    const res = await fetch('/api/license/activate', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ license_key: key })
+    });
+    const data = await res.json();
+    if (data.success) {
+      errEl.textContent = '';
+      document.getElementById('licenseModal').style.display = 'none';
+      await checkLicense();
+    } else {
+      errEl.textContent = data.error || data.message || '인증 실패';
+    }
+  } catch(e) {
+    errEl.textContent = '서버 연결 실패';
+  }
 }
 
 // ── SSE ──

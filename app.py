@@ -18,7 +18,13 @@ os.makedirs(DATA_DIR, exist_ok=True)
 UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-app = Flask(__name__)
+# frozen 빌드 시 템플릿 경로
+if getattr(sys, 'frozen', False):
+    _template_dir = os.path.join(sys._MEIPASS, 'templates')
+else:
+    _template_dir = os.path.join(os.path.dirname(__file__), 'templates')
+
+app = Flask(__name__, template_folder=_template_dir)
 
 # ── State ──
 log_queue = Queue()
@@ -516,6 +522,29 @@ def stop_task():
 @app.route("/api/tasks/status")
 def task_status():
     return jsonify({"running": task_running})
+
+
+# ── License API ──
+
+@app.route("/api/license/status")
+def license_status():
+    from modules.license import get_status
+    return jsonify(get_status())
+
+@app.route("/api/license/activate", methods=["POST"])
+def license_activate():
+    data = request.json or {}
+    key = data.get("license_key", "").strip()
+    if not key:
+        return jsonify({"success": False, "error": "라이선스 키를 입력해주세요"}), 400
+    from modules.license import activate
+    ok, msg, days = activate(key)
+    return jsonify({"success": ok, "message": msg, "days_remaining": days})
+
+
+def run_server():
+    """PyWebView 등 외부 진입점에서 호출하는 서버 시작 함수."""
+    app.run(host="127.0.0.1", port=FLASK_PORT, threaded=True, use_reloader=False)
 
 
 if __name__ == "__main__":
