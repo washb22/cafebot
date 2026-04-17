@@ -62,6 +62,7 @@ a = Analysis(
         'itsdangerous',
         'blinker',
         'greenlet',
+        'openpyxl',
     ],
     hookspath=[],
     hooksconfig={},
