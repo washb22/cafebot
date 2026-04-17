@@ -57,6 +57,45 @@ async def _scroll_to_bottom(page):
         pass
 
 
+async def _scroll_to_comment_area(page):
+    """댓글 영역을 직접 찾아서 해당 위치로 스크롤 (사이드바 긴 카페 대응)"""
+    comment_selectors = [
+        'div.comment_area', 'div.CommentBox', 'div#commentBox',
+        'textarea.comment_inbox_text', 'textarea[placeholder*="댓글"]',
+    ]
+    for t in [page] + list(page.frames):
+        for sel in comment_selectors:
+            try:
+                el = await t.query_selector(sel)
+                if el:
+                    await el.scroll_into_view_if_needed()
+                    await asyncio.sleep(1)
+                    return True
+            except Exception:
+                pass
+    # 셀렉터로 못 찾으면 JS로 iframe 내부 댓글 영역까지 스크롤
+    try:
+        await page.evaluate("""
+            () => {
+                const iframe = document.querySelector('iframe#cafe_main');
+                if (iframe && iframe.contentDocument) {
+                    const area = iframe.contentDocument.querySelector(
+                        'div.comment_area, div.CommentBox, textarea.comment_inbox_text'
+                    );
+                    if (area) {
+                        area.scrollIntoView({behavior: 'smooth', block: 'center'});
+                        return;
+                    }
+                }
+                window.scrollTo(0, document.body.scrollHeight);
+            }
+        """)
+        await asyncio.sleep(1.5)
+    except Exception:
+        pass
+    return False
+
+
 async def write_comment(page, post_url, comment_text, log_fn=None):
     """Write a top-level comment."""
     def log(msg):
@@ -73,8 +112,9 @@ async def write_comment(page, post_url, comment_text, log_fn=None):
             log(f"이동 타임아웃(무시): {e}")
         await human_delay(3, 5)
 
-        # lazy-load 트리거
+        # lazy-load 트리거 + 댓글 영역으로 스크롤
         await _scroll_to_bottom(page)
+        await _scroll_to_comment_area(page)
 
         # 댓글창 탐색
         log("댓글창 탐색...")
@@ -134,6 +174,7 @@ async def write_reply(page, post_url, comment_index, reply_text, log_fn=None):
                 log(f"이동 타임아웃(무시): {e}")
             await human_delay(3, 5)
             await _scroll_to_bottom(page)
+            await _scroll_to_comment_area(page)
 
         # 댓글 목록 탐색 (li.CommentItem 중 최상위 댓글만 — 답글/reply 제외)
         # 버그: li.CommentItem 이 답글(class="CommentItem CommentItem--reply" 등)도 포함
