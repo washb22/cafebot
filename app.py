@@ -114,6 +114,163 @@ def update_accounts():
     return jsonify({"success": True})
 
 
+@app.route("/api/accounts/excel", methods=["POST"])
+def upload_accounts_excel():
+    """엑셀 파일로 계정 일괄 등록. 컬럼: ID, PW, 역할(글작성자/댓글, 선택)"""
+    import openpyxl
+    f = request.files.get("file")
+    if not f:
+        return jsonify({"error": "파일이 없습니다"}), 400
+
+    try:
+        wb = openpyxl.load_workbook(f, read_only=True)
+        ws = wb.active
+        rows = list(ws.iter_rows(values_only=True))
+        wb.close()
+    except Exception as e:
+        return jsonify({"error": f"엑셀 읽기 오류: {e}"}), 400
+
+    if not rows:
+        return jsonify({"error": "빈 파일입니다"}), 400
+
+    # 첫 행이 헤더인지 판별 (ID/아이디 등 포함 시 스킵)
+    first = [str(c or "").strip().lower() for c in rows[0]]
+    header_keywords = ["id", "아이디", "pw", "비밀번호", "password", "역할", "role"]
+    if any(k in first for k in header_keywords):
+        rows = rows[1:]
+
+    accounts = load_accounts()
+    added_main = 0
+    added_comment = 0
+
+    for row in rows:
+        if len(row) < 2:
+            continue
+        acc_id = str(row[0] or "").strip()
+        acc_pw = str(row[1] or "").strip()
+        if not acc_id or not acc_pw:
+            continue
+
+        # 역할 판별: 3번째 컬럼에 "글" 포함 시 글작성자, 나머지 댓글
+        role = "commenter"
+        if len(row) >= 3 and row[2]:
+            role_text = str(row[2]).strip()
+            if "글" in role_text or "main" in role_text.lower() or "작성" in role_text:
+                role = "main"
+
+        # 중복 체크
+        if role == "main":
+            if any(m["id"] == acc_id for m in accounts["mains"]):
+                continue
+            accounts["mains"].append({
+                "id": acc_id, "pw": acc_pw,
+                "label": f"글 {len(accounts['mains']) + 1}"
+            })
+            added_main += 1
+        else:
+            if any(c["id"] == acc_id for c in accounts["commenters"]):
+                continue
+            accounts["commenters"].append({
+                "id": acc_id, "pw": acc_pw,
+                "label": f"댓글 {len(accounts['commenters']) + 1}"
+            })
+            added_comment += 1
+
+    save_accounts(accounts)
+    return jsonify({
+        "success": True,
+        "message": f"글작성자 {added_main}개, 댓글 {added_comment}개 추가됨",
+        "added_main": added_main,
+        "added_comment": added_comment,
+    })
+
+
+@app.route("/api/comment-only/run", methods=["POST"])
+def run_comment_only():
+    """기존 게시글에 댓글만 작업 (글 작성/수정 없음)"""
+    global task_running
+    if task_running:
+        return jsonify({"error": "이미 작업이 실행 중입니다"}), 400
+
+    from modules.txt_parser import parse_scenario_text
+
+    # multipart 또는 json 모두 수용
+    if request.content_type and request.content_type.startswith("multipart/form-data"):
+        data = {
+            "text": request.form.get("text", ""),
+            "post_url": request.form.get("post_url", "").strip(),
+            "main_id": request.form.get("main_id", "").strip(),
+        }
+    else:
+        data = request.json or {}
+
+    post_url = data.get("post_url", "").strip()
+    if not post_url:
+        return jsonify({"error": "게시글 URL을 입력해주세요"}), 400
+
+    raw_text = data.get("text", "")
+    if not raw_text:
+        return jsonify({"error": "시나리오 텍스트가 없습니다"}), 400
+
+    try:
+        parsed = parse_scenario_text(raw_text)
+    except Exception as e:
+        return jsonify({"error": f"파싱 오류: {e}"}), 400
+
+    accounts = load_accounts()
+    main_acc = _resolve_main(accounts, data.get("main_id"))
+    if not main_acc:
+        return jsonify({"error": "메인(글 작성자) 계정이 선택되지 않았거나 존재하지 않습니다"}), 400
+
+    commenter_map = {}
+    for c in accounts.get("commenters", []):
+        label = c.get("label", "")
+        m = re.search(r'\d+', label)
+        if m:
+            commenter_map[int(m.group())] = c
+
+    exec_actions, err = build_shuffled_exec_actions(parsed, commenter_map, main_acc)
+    if err:
+        return jsonify({"error": err}), 400
+
+    task = {
+        "mode": "comment_only",
+        "post_url": post_url,
+        "cafe_url": "",
+        "board_name": "",
+        "title": "",
+        "body": "",
+        "main_account": main_acc,
+        "comments": [],
+        "replies": [],
+        "scenario": exec_actions,
+        "image_map": {},
+    }
+
+    stop_event.clear()
+    task_running = True
+
+    def log_fn(msg):
+        ts = time.strftime("%H:%M:%S")
+        log_queue.put({"type": "log", "time": ts, "message": msg})
+
+    def run_in_thread():
+        global task_running
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            from modules.task_runner import run_task
+            result = loop.run_until_complete(run_task(task, log_fn, stop_event))
+            log_queue.put({"type": "done", "result": result})
+        except Exception as e:
+            log_queue.put({"type": "error", "message": str(e)})
+        finally:
+            task_running = False
+
+    threading.Thread(target=run_in_thread, daemon=True).start()
+    return jsonify({"success": True, "message": f"댓글 작업 시작 ({len(exec_actions)}개 액션)"})
+
+
 @app.route("/api/adb/status")
 def adb_status():
     from modules.adb_network import is_device_connected, get_current_ip

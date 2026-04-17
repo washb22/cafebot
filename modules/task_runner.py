@@ -57,46 +57,56 @@ async def run_task(task, log_fn, stop_event=None):
     def should_stop():
         return stop_event and stop_event.is_set()
 
-    total_steps = 2 + len(task.get("comments", [])) + (1 if task.get("replies") else 0)
+    is_comment_only = task.get("mode") == "comment_only"
+
+    if is_comment_only:
+        total_steps = len(task.get("scenario", [])) or (len(task.get("comments", [])) + (1 if task.get("replies") else 0))
+    else:
+        total_steps = 2 + len(task.get("comments", [])) + (1 if task.get("replies") else 0)
     current_step = 0
 
     try:
         # ═══════════════════════════════════════
-        # STEP 1: Main account - Write/Edit post
+        # STEP 1: Main account - Write/Edit post (comment_only 모드에서는 스킵)
         # ═══════════════════════════════════════
-        current_step += 1
-        log_fn(f"━━━ [{current_step}/{total_steps}] 글 작성/수정 ━━━")
+        if is_comment_only:
+            post_url = task["post_url"]
+            log_fn(f"━━━ 댓글 전용 모드 ━━━")
+            log_fn(f"대상 글: {post_url}")
+        else:
+            current_step += 1
+            log_fn(f"━━━ [{current_step}/{total_steps}] 글 작성/수정 ━━━")
 
-        async with new_session() as (ctx, page):
-            success = await naver_login(page, main["id"], main["pw"], log_fn)
-            if not success:
-                log_fn("❌ 메인 계정 로그인 실패 - 작업 중단")
-                return {"success": False, "error": "메인 계정 로그인 실패"}
+            async with new_session() as (ctx, page):
+                success = await naver_login(page, main["id"], main["pw"], log_fn)
+                if not success:
+                    log_fn("❌ 메인 계정 로그인 실패 - 작업 중단")
+                    return {"success": False, "error": "메인 계정 로그인 실패"}
 
-            await random_delay("after_login", delays, stop_event)
+                await random_delay("after_login", delays, stop_event)
 
-            if task["mode"] == "new":
-                post_url = await write_post(
-                    page, task["cafe_url"], task["title"], task["body"],
-                    task.get("board_name"), log_fn,
-                    image_map=task.get("image_map"),
-                )
-                if not post_url:
-                    log_fn("❌ 글 작성 실패 - 작업 중단")
-                    return {"success": False, "error": "글 작성 실패"}
-            else:
-                post_url = task["post_url"]
-                result = await edit_post(
-                    page, post_url, task["title"], task["body"], log_fn,
-                    image_map=task.get("image_map"),
-                )
-                if not result:
-                    log_fn("❌ 글 수정 실패 - 작업 중단")
-                    return {"success": False, "error": "글 수정 실패"}
+                if task["mode"] == "new":
+                    post_url = await write_post(
+                        page, task["cafe_url"], task["title"], task["body"],
+                        task.get("board_name"), log_fn,
+                        image_map=task.get("image_map"),
+                    )
+                    if not post_url:
+                        log_fn("❌ 글 작성 실패 - 작업 중단")
+                        return {"success": False, "error": "글 작성 실패"}
+                else:
+                    post_url = task["post_url"]
+                    result = await edit_post(
+                        page, post_url, task["title"], task["body"], log_fn,
+                        image_map=task.get("image_map"),
+                    )
+                    if not result:
+                        log_fn("❌ 글 수정 실패 - 작업 중단")
+                        return {"success": False, "error": "글 수정 실패"}
 
-            await random_delay("after_post_submit", delays, stop_event)
+                await random_delay("after_post_submit", delays, stop_event)
 
-        log_fn(f"글 URL: {post_url}")
+            log_fn(f"글 URL: {post_url}")
 
         if should_stop():
             log_fn("⚠ 작업 중단됨")

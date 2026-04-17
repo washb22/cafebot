@@ -197,6 +197,11 @@
         </select>
         <button class="btn btn-outline btn-sm" onclick="addAccount()">추가</button>
       </div>
+      <div style="margin-top:8px;display:flex;gap:6px;align-items:center">
+        <input type="file" id="excelFile" accept=".xlsx,.xls" class="form-input" style="flex:1">
+        <button class="btn btn-outline btn-sm" onclick="uploadExcel()">엑셀 일괄등록</button>
+      </div>
+      <div style="font-size:10px;color:var(--muted);margin-top:4px">엑셀 형식: A열=ID, B열=PW, C열=역할(선택, "글작성자" 또는 비우면 댓글)</div>
     </div>
 
     <!-- TXT 파일 배치 큐 -->
@@ -243,6 +248,28 @@
       </div>
 
       <button id="btnQueueRun" class="btn btn-primary" style="margin-top:10px;width:100%;padding:12px;font-size:14px" onclick="runQueue()" disabled>▶ 전체 실행 (0개)</button>
+    </div>
+
+    <!-- 댓글 전용 작업 -->
+    <div class="section" style="border:2px solid var(--accent);background:rgba(124,111,255,0.05)">
+      <div class="section-title">💬 댓글 전용 작업 (기존 글에 댓글만)</div>
+      <p style="font-size:12px;color:var(--muted);margin-bottom:10px">
+        이미 등록된 게시글에 댓글/대댓글만 작업합니다. 글 작성 없이 댓글만 실행됩니다.
+      </p>
+      <div class="form-row">
+        <div class="form-label">게시글 URL</div>
+        <input id="commentOnlyPostUrl" class="form-input" placeholder="예: https://cafe.naver.com/mycafe/12345">
+      </div>
+      <div class="form-row">
+        <div class="form-label">글 작성자</div>
+        <select id="commentOnlyMainId" class="form-input"></select>
+      </div>
+      <div class="form-row">
+        <div class="form-label">TXT 파일</div>
+        <input type="file" id="commentOnlyFile" accept=".txt" class="form-input" onchange="previewCommentOnly()">
+      </div>
+      <div id="commentOnlyPreview" style="display:none;margin-top:8px;padding:8px;background:rgba(0,0,0,0.2);border-radius:6px;font-size:12px"></div>
+      <button id="btnCommentOnlyRun" class="btn btn-primary" style="margin-top:10px;width:100%;padding:12px;font-size:14px" onclick="runCommentOnly()" disabled>▶ 댓글 작업 시작</button>
     </div>
 
     <!-- Task Mode -->
@@ -477,10 +504,26 @@ function renderAccounts() {
   el.innerHTML = html || '<span style="font-size:12px;color:var(--muted)">등록된 계정이 없습니다</span>';
 }
 
+async function uploadExcel() {
+  const fileInput = document.getElementById('excelFile');
+  const f = fileInput.files[0];
+  if (!f) { alert('엑셀 파일을 선택해주세요'); return; }
+  const fd = new FormData();
+  fd.append('file', f);
+  try {
+    const res = await fetch('/api/accounts/excel', { method: 'POST', body: fd });
+    const data = await res.json();
+    if (data.error) { alert('오류: ' + data.error); return; }
+    alert(data.message);
+    fileInput.value = '';
+    await loadAccounts();
+  } catch(e) { alert('업로드 오류: ' + e.message); }
+}
+
 function updateMainSelects() {
   const options = accounts.mains.map((m, i) =>
     `<option value="${m.id}">글 ${i+1} — ${m.id}</option>`).join('');
-  ['scenarioMainId', 'manualMainId'].forEach(id => {
+  ['scenarioMainId', 'manualMainId', 'commentOnlyMainId'].forEach(id => {
     const sel = document.getElementById(id);
     if (!sel) return;
     const prev = sel.value;
@@ -1160,6 +1203,66 @@ async function startTask() {
 async function stopTask() {
   await fetch('/api/tasks/stop', { method: 'POST' });
   addLog('--:--:--', '⚠ 중단 요청됨...');
+}
+
+// ── Comment Only ──
+let commentOnlyText = '';
+let commentOnlyParsed = null;
+
+async function previewCommentOnly() {
+  const file = document.getElementById('commentOnlyFile').files[0];
+  const preview = document.getElementById('commentOnlyPreview');
+  const btn = document.getElementById('btnCommentOnlyRun');
+  if (!file) { preview.style.display = 'none'; btn.disabled = true; commentOnlyParsed = null; return; }
+
+  commentOnlyText = await file.text();
+  const fd = new FormData();
+  fd.append('file', file);
+  try {
+    const res = await fetch('/api/scenario/parse', { method: 'POST', body: fd });
+    const data = await res.json();
+    if (data.error) {
+      preview.innerHTML = `<span style="color:#dc3545">오류: ${data.error}</span>`;
+      preview.style.display = 'block'; btn.disabled = true; return;
+    }
+    const commentCount = data.actions.filter(a => a.action === 'comment').length;
+    const replyCount = data.actions.filter(a => a.action === 'reply').length;
+    const missingStr = data.missing_nums.length
+      ? `<div style="color:#dc3545;margin-top:6px">⚠ 미등록 계정: 댓글 ${data.missing_nums.join(', ')}</div>`
+      : `<div style="color:#28a745;margin-top:6px">✓ 필요 계정 모두 등록됨</div>`;
+    preview.innerHTML = `
+      <div><strong>댓글 ${commentCount}개</strong> / <strong>대댓글 ${replyCount}개</strong> / 총 ${data.actions.length}개 액션</div>
+      <div><strong>필요 commenter:</strong> ${data.commenter_nums.join(', ')}</div>
+      ${missingStr}`;
+    preview.style.display = 'block';
+    commentOnlyParsed = data;
+    btn.disabled = data.missing_nums.length > 0;
+  } catch(e) {
+    preview.innerHTML = `<span style="color:#dc3545">오류: ${e}</span>`;
+    preview.style.display = 'block'; btn.disabled = true; commentOnlyParsed = null;
+  }
+}
+
+async function runCommentOnly() {
+  const postUrl = document.getElementById('commentOnlyPostUrl').value.trim();
+  const mainId = document.getElementById('commentOnlyMainId').value;
+  if (!postUrl) { alert('게시글 URL을 입력해주세요'); return; }
+  if (!mainId) { alert('글 작성자를 선택해주세요'); return; }
+  if (!commentOnlyText) { alert('TXT 파일을 업로드해주세요'); return; }
+
+  const fd = new FormData();
+  fd.append('text', commentOnlyText);
+  fd.append('post_url', postUrl);
+  fd.append('main_id', mainId);
+
+  try {
+    const res = await fetch('/api/comment-only/run', { method: 'POST', body: fd });
+    const data = await res.json();
+    if (data.error) { alert('오류: ' + data.error); return; }
+    addLog('--:--:--', data.message || '댓글 작업 시작');
+    document.getElementById('btnRun').disabled = true;
+    document.getElementById('btnStop').disabled = false;
+  } catch(e) { alert('요청 오류: ' + e.message); }
 }
 
 // Init
