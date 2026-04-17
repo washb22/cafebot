@@ -691,34 +691,41 @@ function parseProgress(msg) {
     progress.subTotal = +stepMatch[2];
   }
 
+  // 액션 헤더 ━━━ [N/M] comment (댓글 5) ━━━ → 칩 상태 전환
+  const actionHeader = msg.match(/━━━ \[\d+\/\d+\] (\w+) \((.+?)\) ━━━/);
+  if (actionHeader) {
+    // 이전 active 칩 → done
+    if (currentActiveChipId) updateChipById(currentActiveChipId, 'done');
+    // 라벨에서 숫자 추출 → 해당 칩 active
+    const label = actionHeader[2];
+    updateChipByLabel(label, 'active');
+  }
+
   // 액션 텍스트 추출
-  if (msg.includes('글 작성')) progress.action = '글 작성 중';
-  else if (msg.includes('글 수정')) progress.action = '글 수정 중';
-  else if (msg.includes('댓글') && msg.includes('━━━')) progress.action = `댓글 ${progress.subCurrent}/${progress.subTotal}`;
-  else if (msg.includes('대댓글')) progress.action = '대댓글 작성 중';
+  if (msg.includes('글 작성') && msg.includes('━━━')) progress.action = '글 작성 중';
+  else if (msg.includes('글 수정') && msg.includes('━━━')) progress.action = '글 수정 중';
+  else if (msg.includes('comment') && msg.includes('━━━')) progress.action = `댓글 ${progress.subCurrent}/${progress.subTotal}`;
+  else if (msg.includes('reply') && msg.includes('━━━')) progress.action = `대댓글 ${progress.subCurrent}/${progress.subTotal}`;
   else if (msg.includes('IP 변경')) progress.action = 'IP 변경 중...';
   else if (msg.includes('로그인 시도')) {
     const m = msg.match(/로그인 시도: (\S+)/);
-    if (m) { progress.action = `로그인: ${m[1]}`; updateChipById(m[1], 'active'); }
+    if (m) progress.action = `로그인: ${m[1]}`;
   }
   else if (msg.includes('로그인 실패')) {
-    const m = msg.match(/계정 (\S+?)\*{3}/);
-    if (m) updateChipById(m[1], 'fail');
+    if (currentActiveChipId) updateChipById(currentActiveChipId, 'fail');
   }
 
-  // 계정셔플 로그에서 역할→계정 매핑 → 해당 계정 대기 상태로
-  const shuffleMatch = msg.match(/\[계정셔플[^\]]*\] (.+)/);
-  if (shuffleMatch) {
-    const pairs = shuffleMatch[1].split(',');
-    pairs.forEach(p => {
-      const m = p.match(/역할(\d+)→(\S+)/);
-      if (m) updateChipById(m[2], 'active');
+  // 계정셔플 로그 → 모든 칩 리셋만 (active 표시하지 않음)
+  if (msg.includes('[계정셔플')) {
+    document.querySelectorAll('.chip').forEach(c => {
+      c.classList.remove('active', 'done', 'fail');
     });
+    currentActiveChipId = null;
   }
 
-  // 댓글 완료
-  if (msg.includes('댓글 작성 완료') || msg.includes('댓글 등록 완료')) {
-    if (currentActiveChipId) updateChipById(currentActiveChipId, 'done');
+  // 작업 완료 → 마지막 active 칩 done
+  if (msg.includes('✅') || msg.includes('✓')) {
+    if (currentActiveChipId) { updateChipById(currentActiveChipId, 'done'); currentActiveChipId = null; }
   }
 
   updateProgressUI();
@@ -774,17 +781,30 @@ function renderAccountChips() {
   el.innerHTML = html || '<span style="color:var(--muted);font-size:11px">등록된 계정 없음</span>';
 }
 
-function updateChipById(idPrefix, state) {
-  // idPrefix가 풀 id 또는 앞 3글자 prefix 둘 다 허용
-  const chips = document.querySelectorAll('.chip[data-id]');
-  chips.forEach(c => {
-    const id = c.dataset.id;
-    if (id === idPrefix || id.startsWith(idPrefix)) {
-      c.classList.remove('active', 'done', 'fail');
-      c.classList.add(state);
-      if (state === 'active') currentActiveChipId = id;
+function updateChipById(id, state) {
+  const chip = document.querySelector(`.chip[data-id="${id}"]`);
+  if (chip) {
+    chip.classList.remove('active', 'done', 'fail');
+    chip.classList.add(state);
+    if (state === 'active') currentActiveChipId = id;
+  }
+}
+
+function updateChipByLabel(label, state) {
+  // "댓글 5", "댓글5", "글 2" 등에서 숫자 추출 → 칩 매칭
+  const m = label.match(/(댓글|글)\s*(\d+)/);
+  if (!m) return;
+  const type = m[1] === '글' ? 'main' : 'commenter';
+  const num = +m[2];
+  const list = type === 'main' ? accounts.mains : accounts.commenters;
+  if (num >= 1 && num <= list.length) {
+    const id = list[num - 1].id;
+    // 이전 active 해제
+    if (currentActiveChipId && currentActiveChipId !== id) {
+      updateChipById(currentActiveChipId, 'done');
     }
-  });
+    updateChipById(id, state);
+  }
 }
 
 function escHtml(s) {
