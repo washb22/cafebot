@@ -14,7 +14,7 @@ from config import DATA_DIR
 LICENSE_FILE = os.path.join(DATA_DIR, "license.dat")
 LICENSE_SERVER = "https://cafebot-license.onrender.com"
 HMAC_SECRET = b"CafeBot_LicenseKey_2026_v1_Secret"
-GRACE_PERIOD = 86400  # 24시간 오프라인 허용
+CHECK_INTERVAL = 3600  # 1시간마다 서버 인증 시도
 
 
 def _wmic(query):
@@ -134,9 +134,9 @@ def verify():
 
     days = max(0, (expiry - now) // 86400)
 
-    # 24시간 경과 시 서버 재인증
+    # 1시간 경과 시 서버 재인증 시도 (실패해도 만료일 전이면 사용 가능)
     last_check = data.get("last_check", 0)
-    if now - last_check > GRACE_PERIOD:
+    if now - last_check > CHECK_INTERVAL:
         try:
             resp = requests.post(
                 f"{LICENSE_SERVER}/api/license/verify",
@@ -153,8 +153,7 @@ def verify():
             else:
                 return False, 0, srv.get("error", "서버 인증 실패")
         except requests.ConnectionError:
-            if now - last_check > GRACE_PERIOD * 3:
-                return False, 0, "오프라인 기간이 너무 깁니다. 인터넷 연결 후 재시도."
+            pass  # 오프라인이어도 만료일 전이면 계속 사용
 
     return True, days, ""
 
