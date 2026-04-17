@@ -34,21 +34,36 @@ def get_current_ip() -> str:
             return ""
 
 
-async def _single_toggle(log, wait_on=15, wait_off_loop=30):
+async def interruptible_sleep(seconds, stop_event=None):
+    """0.5초 단위로 끊어 자면서 stop_event 체크. 중단 시 True 반환."""
+    elapsed = 0
+    while elapsed < seconds:
+        if stop_event and stop_event.is_set():
+            return True
+        chunk = min(0.5, seconds - elapsed)
+        await asyncio.sleep(chunk)
+        elapsed += chunk
+    return False
+
+
+async def _single_toggle(log, wait_on=15, wait_off_loop=30, stop_event=None):
     """비행기모드 1회 토글 + IP 감지 루프"""
     old_ip = get_current_ip()
     log(f"현재 IP: {old_ip}")
 
     log(f"비행기 모드 ON ({wait_on}초 대기)...")
     run_adb("shell cmd connectivity airplane-mode enable")
-    await asyncio.sleep(wait_on)
+    if await interruptible_sleep(wait_on, stop_event):
+        run_adb("shell cmd connectivity airplane-mode disable")
+        return old_ip, old_ip
 
     log("비행기 모드 OFF...")
     run_adb("shell cmd connectivity airplane-mode disable")
 
     log("IP 변경 대기 중...")
     for attempt in range(wait_off_loop):
-        await asyncio.sleep(2)
+        if await interruptible_sleep(2, stop_event):
+            return get_current_ip(), old_ip
         new_ip = get_current_ip()
         if new_ip and new_ip != old_ip:
             log(f"IP 변경 완료: {old_ip} → {new_ip}")
@@ -58,20 +73,20 @@ async def _single_toggle(log, wait_on=15, wait_off_loop=30):
     return get_current_ip(), old_ip
 
 
-async def toggle_airplane_mode(log_fn=None):
+async def toggle_airplane_mode(log_fn=None, stop_event=None):
     """비행기 모드 토글. 1차 실패 시 더 길게 대기하고 재시도"""
     def log(msg):
         if log_fn:
             log_fn(msg)
 
     # 1차 시도 (5초 - 빠른 경로)
-    new_ip, old_ip = await _single_toggle(log, wait_on=5, wait_off_loop=30)
-    if new_ip and new_ip != old_ip:
+    new_ip, old_ip = await _single_toggle(log, wait_on=5, wait_off_loop=30, stop_event=stop_event)
+    if (stop_event and stop_event.is_set()) or (new_ip and new_ip != old_ip):
         return new_ip
 
     # 2차 시도: 더 길게 대기 (통신사 sticky IP 회피)
     log("⚠ 1차 IP 변경 실패 - 15초 대기 후 재시도...")
-    new_ip2, _ = await _single_toggle(log, wait_on=15, wait_off_loop=30)
+    new_ip2, _ = await _single_toggle(log, wait_on=15, wait_off_loop=30, stop_event=stop_event)
     if new_ip2 and new_ip2 != old_ip:
         return new_ip2
 
@@ -80,7 +95,7 @@ async def toggle_airplane_mode(log_fn=None):
     return new_ip2 or old_ip
 
 
-async def manual_ip_change(log_fn=None):
+async def manual_ip_change(log_fn=None, stop_event=None):
     """Prompt-based manual IP change (fallback if ADB unavailable)."""
     def log(msg):
         if log_fn:
@@ -91,7 +106,8 @@ async def manual_ip_change(log_fn=None):
     log("⚠ 비행기 모드를 수동으로 껐다 켜주세요!")
 
     for attempt in range(60):
-        await asyncio.sleep(2)
+        if await interruptible_sleep(2, stop_event):
+            return get_current_ip()
         new_ip = get_current_ip()
         if new_ip and new_ip != old_ip:
             log(f"IP 변경 확인: {old_ip} → {new_ip}")

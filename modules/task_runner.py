@@ -7,25 +7,25 @@ from modules.browser import new_session
 from modules.naver_auth import naver_login
 from modules.naver_post import write_post, edit_post
 from modules.naver_comment import write_comment, write_reply
-from modules.adb_network import toggle_airplane_mode, manual_ip_change, is_device_connected
+from modules.adb_network import toggle_airplane_mode, manual_ip_change, is_device_connected, interruptible_sleep
 from config import DEFAULT_DELAYS
 
 
-async def random_delay(key, delays=None):
-    """Wait for a random duration based on delay config."""
+async def random_delay(key, delays=None, stop_event=None):
+    """Wait for a random duration based on delay config. 중단 가능."""
     d = (delays or DEFAULT_DELAYS).get(key, (2, 5))
     wait = random.uniform(d[0], d[1])
-    await asyncio.sleep(wait)
+    await interruptible_sleep(wait, stop_event)
 
 
-async def change_ip(log_fn, delays=None):
-    """Change IP via ADB or manual method."""
+async def change_ip(log_fn, delays=None, stop_event=None):
+    """Change IP via ADB or manual method. 중단 가능."""
     if is_device_connected():
-        await toggle_airplane_mode(log_fn)
+        await toggle_airplane_mode(log_fn, stop_event=stop_event)
     else:
         log_fn("⚠ ADB 장치 미연결 - 수동 IP 변경 모드")
-        await manual_ip_change(log_fn)
-    await random_delay("airplane_toggle_wait", delays)
+        await manual_ip_change(log_fn, stop_event=stop_event)
+    await random_delay("airplane_toggle_wait", delays, stop_event)
 
 
 async def run_task(task, log_fn, stop_event=None):
@@ -73,7 +73,7 @@ async def run_task(task, log_fn, stop_event=None):
                 log_fn("❌ 메인 계정 로그인 실패 - 작업 중단")
                 return {"success": False, "error": "메인 계정 로그인 실패"}
 
-            await random_delay("after_login", delays)
+            await random_delay("after_login", delays, stop_event)
 
             if task["mode"] == "new":
                 post_url = await write_post(
@@ -94,7 +94,7 @@ async def run_task(task, log_fn, stop_event=None):
                     log_fn("❌ 글 수정 실패 - 작업 중단")
                     return {"success": False, "error": "글 수정 실패"}
 
-            await random_delay("after_post_submit", delays)
+            await random_delay("after_post_submit", delays, stop_event)
 
         log_fn(f"글 URL: {post_url}")
 
@@ -114,10 +114,12 @@ async def run_task(task, log_fn, stop_event=None):
             current_step += 1
             log_fn(f"━━━ [{current_step}/{total_steps}] 댓글 {i + 1}/{len(comments)} ━━━")
 
-            # IP change
             log_fn("IP 변경 중...")
-            await change_ip(log_fn, delays)
-            await random_delay("between_accounts", delays)
+            await change_ip(log_fn, delays, stop_event)
+            if should_stop():
+                log_fn("⚠ 작업 중단됨")
+                return {"success": False, "error": "사용자 중단"}
+            await random_delay("between_accounts", delays, stop_event)
 
             acc = comment_data["account"]
             async with new_session() as (ctx, page):
@@ -126,10 +128,13 @@ async def run_task(task, log_fn, stop_event=None):
                     log_fn(f"⚠ 댓글 계정 {acc['id'][:3]}*** 로그인 실패 - 건너뜀")
                     continue
 
-                await random_delay("after_login", delays)
+                await random_delay("after_login", delays, stop_event)
+                if should_stop():
+                    log_fn("⚠ 작업 중단됨")
+                    return {"success": False, "error": "사용자 중단"}
 
                 await write_comment(page, post_url, comment_data["text"], log_fn)
-                await random_delay("after_comment_submit", delays)
+                await random_delay("after_comment_submit", delays, stop_event)
 
         # ═══════════════════════════════════════
         # STEP FINAL: Main account - Replies
@@ -143,10 +148,12 @@ async def run_task(task, log_fn, stop_event=None):
             current_step += 1
             log_fn(f"━━━ [{current_step}/{total_steps}] 대댓글 작성 ━━━")
 
-            # IP change
             log_fn("IP 변경 중...")
-            await change_ip(log_fn, delays)
-            await random_delay("between_accounts", delays)
+            await change_ip(log_fn, delays, stop_event)
+            if should_stop():
+                log_fn("⚠ 작업 중단됨")
+                return {"success": False, "error": "사용자 중단"}
+            await random_delay("between_accounts", delays, stop_event)
 
             async with new_session() as (ctx, page):
                 success = await naver_login(page, main["id"], main["pw"], log_fn)
@@ -154,7 +161,7 @@ async def run_task(task, log_fn, stop_event=None):
                     log_fn("⚠ 메인 계정 대댓글 로그인 실패")
                     return {"success": False, "error": "대댓글 로그인 실패"}
 
-                await random_delay("after_login", delays)
+                await random_delay("after_login", delays, stop_event)
 
                 for j, reply_data in enumerate(replies):
                     if should_stop():
@@ -164,7 +171,7 @@ async def run_task(task, log_fn, stop_event=None):
                         page, post_url, reply_data["to_index"],
                         reply_data["text"], log_fn
                     )
-                    await random_delay("after_comment_submit", delays)
+                    await random_delay("after_comment_submit", delays, stop_event)
 
         # ═══════════════════════════════════════
         # SCENARIO: 시나리오 모드 (txt 파일 기반)
@@ -186,8 +193,11 @@ async def run_task(task, log_fn, stop_event=None):
                 log_fn(f"━━━ [{idx}/{len(scenario)}] {act.get('action')} ({acc.get('label', acc.get('id', ''))[:10]}) ━━━")
 
                 log_fn("IP 변경 중...")
-                await change_ip(log_fn, delays)
-                await random_delay("between_accounts", delays)
+                await change_ip(log_fn, delays, stop_event)
+                if should_stop():
+                    log_fn("⚠ 작업 중단됨")
+                    return {"success": False, "error": "사용자 중단"}
+                await random_delay("between_accounts", delays, stop_event)
 
                 try:
                     async with new_session() as (ctx, page):
@@ -195,7 +205,10 @@ async def run_task(task, log_fn, stop_event=None):
                         if not ok:
                             log_fn(f"⚠ 로그인 실패 - action #{idx} 건너뜀")
                             continue
-                        await random_delay("after_login", delays)
+                        await random_delay("after_login", delays, stop_event)
+                        if should_stop():
+                            log_fn("⚠ 작업 중단됨")
+                            return {"success": False, "error": "사용자 중단"}
 
                         if act["action"] == "comment":
                             await write_comment(page, post_url, act["text"], log_fn)
@@ -204,7 +217,7 @@ async def run_task(task, log_fn, stop_event=None):
                         else:
                             log_fn(f"⚠ 알 수 없는 action: {act['action']}")
 
-                        await random_delay("after_comment_submit", delays)
+                        await random_delay("after_comment_submit", delays, stop_event)
                 except Exception as e:
                     log_fn(f"⚠ action #{idx} 오류 - 계속 진행: {e}")
 
