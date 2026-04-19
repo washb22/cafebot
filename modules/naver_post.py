@@ -118,14 +118,17 @@ async def _find_visible(frames_list, selectors, min_w=100, min_h=10, max_wait=20
 
 async def _insert_image(page, image_path, log_fn=None):
     """SmartEditor 본문 입력 중 커서 위치에 이미지 삽입.
-    가장 불안정한 파트: 네이버 SmartEditor DOM 변경 시 selector 조정 필요.
-    여러 selector 후보를 순차 시도.
+
+    네이티브 파일 피커 차단:
+      page.on("filechooser") 리스너를 미리 걸어 두면, Chromium 이 OS 파일 피커를
+      띄우려 할 때 Playwright 가 이벤트를 선점해 프로그래매틱으로 파일 세팅함 →
+      OS "열기" 창이 화면에 뜨지 않음. 2차 분기(툴바 버튼 클릭)에서 필수.
     """
     def log(msg):
         if log_fn:
             log_fn(msg)
 
-    # 툴바 사진 버튼 후보 (SmartEditor 2 / ONE 공통 추정)
+    # 툴바 사진 버튼 후보
     photo_selectors = [
         'button[aria-label*="사진"]',
         'button[data-type="image"]',
@@ -135,8 +138,21 @@ async def _insert_image(page, image_path, log_fn=None):
         'button:has(.se-toolbar-icon-image)',
     ]
 
+    # 파일 피커 선점 리스너 등록
+    fc_handled = {"done": False}
+
+    async def _fc_handler(fc):
+        try:
+            await fc.set_files(image_path)
+            fc_handled["done"] = True
+        except Exception:
+            pass
+
+    page.on("filechooser", _fc_handler)
+
     try:
-        # 파일 업로드 input 은 툴바 버튼 클릭 없이도 페이지에 존재할 가능성 있음 → 먼저 시도
+        # 1차 분기: 페이지에 이미 있는 input[type="file"] 에 직접 파일 세팅
+        # (OS 창 안 뜸)
         for t in [page] + list(page.frames):
             try:
                 inputs = await t.query_selector_all('input[type="file"]')
@@ -145,7 +161,7 @@ async def _insert_image(page, image_path, log_fn=None):
                         accept = await inp.get_attribute("accept") or ""
                         if "image" in accept.lower() or accept == "":
                             await inp.set_input_files(image_path)
-                            log(f"  이미지 업로드: {image_path.rsplit(chr(92), 1)[-1]}")
+                            log(f"  이미지 업로드(직접 input): {image_path.rsplit(chr(92), 1)[-1]}")
                             await asyncio.sleep(4)
                             return True
                     except Exception:
@@ -153,7 +169,7 @@ async def _insert_image(page, image_path, log_fn=None):
             except Exception:
                 pass
 
-        # 툴바 버튼 클릭 → 파일 input 노출 기다리기
+        # 2차 분기: 툴바 버튼 클릭 (filechooser 리스너가 OS 창 선점)
         btn = None
         btn_frame = None
         for t in [page] + list(page.frames):
@@ -176,16 +192,22 @@ async def _insert_image(page, image_path, log_fn=None):
             return False
 
         await btn.click()
-        await asyncio.sleep(1.5)
+        await asyncio.sleep(2)  # filechooser 이벤트 발생 + 리스너 처리 시간
 
-        # 파일 input 재탐색
+        # filechooser 가 이미 파일 세팅했으면 성공
+        if fc_handled["done"]:
+            log(f"  이미지 업로드(filechooser 선점): {image_path.rsplit(chr(92), 1)[-1]}")
+            await asyncio.sleep(3)
+            return True
+
+        # filechooser 가 안 뜬 케이스 — 모달이 열렸을 수 있음. 다시 input 탐색
         for t in [page] + list(page.frames):
             try:
                 inputs = await t.query_selector_all('input[type="file"]')
                 for inp in inputs:
                     try:
                         await inp.set_input_files(image_path)
-                        log(f"  이미지 업로드: {image_path.rsplit(chr(92), 1)[-1]}")
+                        log(f"  이미지 업로드(재탐색 input): {image_path.rsplit(chr(92), 1)[-1]}")
                         await asyncio.sleep(4)
                         return True
                     except Exception:
@@ -198,6 +220,11 @@ async def _insert_image(page, image_path, log_fn=None):
     except Exception as e:
         log(f"  ⚠ 이미지 삽입 오류: {e}")
         return False
+    finally:
+        try:
+            page.remove_listener("filechooser", _fc_handler)
+        except Exception:
+            pass
 
 
 async def _type_body_with_images(page, body_el, body, image_map, log_fn=None):
