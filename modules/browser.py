@@ -24,23 +24,56 @@ VIEWPORTS = [
 ]
 
 
+def _normalize_proxy(proxy):
+    """Accepts 'host:port', 'host:port:user:pass', 'http://host:port', or dict.
+    Returns Playwright proxy dict {server, username?, password?} or None."""
+    if not proxy:
+        return None
+    if isinstance(proxy, dict):
+        return proxy
+    s = str(proxy).strip()
+    if not s:
+        return None
+    # 스킴 분리
+    scheme = "http"
+    if "://" in s:
+        scheme, s = s.split("://", 1)
+    parts = s.split(":")
+    if len(parts) == 2:
+        host, port = parts
+        return {"server": f"{scheme}://{host}:{port}"}
+    if len(parts) == 4:
+        host, port, user, pw = parts
+        return {"server": f"{scheme}://{host}:{port}", "username": user, "password": pw}
+    return {"server": f"{scheme}://{s}"}
+
+
 @asynccontextmanager
-async def new_session(pw=None, headless=False):
+async def new_session(pw=None, headless=False, proxy=None):
     """Create a fresh incognito browser session. Yields (context, page).
-    Guarantees full cleanup on exit (no cookie/cache leak)."""
+    Guarantees full cleanup on exit (no cookie/cache leak).
+
+    proxy: 'host:port' 또는 'host:port:user:pass' 또는 dict. None 이면 프록시 미사용.
+    """
     own_pw = False
     if pw is None:
         pw = await async_playwright().start()
         own_pw = True
 
-    browser = await pw.chromium.launch(
-        headless=headless,
-        args=[
+    proxy_cfg = _normalize_proxy(proxy)
+
+    launch_kwargs = {
+        "headless": headless,
+        "args": [
             "--disable-blink-features=AutomationControlled",
             "--no-first-run",
             "--disable-infobars",
-        ]
-    )
+        ],
+    }
+    if proxy_cfg:
+        launch_kwargs["proxy"] = proxy_cfg
+
+    browser = await pw.chromium.launch(**launch_kwargs)
 
     viewport = random.choice(VIEWPORTS)
     ua = random.choice(USER_AGENTS)

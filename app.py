@@ -114,9 +114,52 @@ def update_accounts():
     return jsonify({"success": True})
 
 
+@app.route("/api/accounts/proxy", methods=["POST"])
+def update_account_proxy():
+    """계정 1개의 프록시 매핑만 수정. body: {type:'main'|'commenter', index, proxy}"""
+    data = request.json or {}
+    t = data.get("type")
+    idx = data.get("index")
+    proxy = (data.get("proxy") or "").strip()
+    if t not in ("main", "commenter") or not isinstance(idx, int):
+        return jsonify({"error": "잘못된 요청"}), 400
+    accounts = load_accounts()
+    key = "mains" if t == "main" else "commenters"
+    arr = accounts.get(key, [])
+    if idx < 0 or idx >= len(arr):
+        return jsonify({"error": "인덱스 범위 초과"}), 400
+    arr[idx]["proxy"] = proxy
+    save_accounts(accounts)
+    return jsonify({"success": True, "proxy": proxy})
+
+
+@app.route("/api/accounts/proxy/bulk", methods=["POST"])
+def update_proxies_bulk():
+    """여러 계정 프록시 일괄 매핑. body: {commenters: ["host:port", ...], mains: [...]}
+    배열 길이만큼 순서대로 매핑. 빈 문자열은 스킵."""
+    data = request.json or {}
+    accounts = load_accounts()
+    for key in ("commenters", "mains"):
+        vals = data.get(key)
+        if not isinstance(vals, list):
+            continue
+        arr = accounts.get(key, [])
+        for i, v in enumerate(vals):
+            if i >= len(arr):
+                break
+            if v is None:
+                continue
+            arr[i]["proxy"] = str(v).strip()
+    save_accounts(accounts)
+    return jsonify({"success": True})
+
+
 @app.route("/api/accounts/excel", methods=["POST"])
 def upload_accounts_excel():
-    """엑셀 파일로 계정 일괄 등록. 컬럼: ID, PW, 역할(글작성자/댓글, 선택)"""
+    """엑셀로 계정 일괄 등록/갱신.
+    컬럼: A=ID, B=PW, C=역할(글작성자/댓글), D=프록시(host:port), E=라벨(선택)
+    기존 ID 와 같으면 PW/프록시/라벨 업데이트 (삭제는 안 함).
+    """
     import openpyxl
     f = request.files.get("file")
     if not f:
@@ -133,56 +176,128 @@ def upload_accounts_excel():
     if not rows:
         return jsonify({"error": "빈 파일입니다"}), 400
 
-    # 첫 행이 헤더인지 판별 (ID/아이디 등 포함 시 스킵)
+    # 헤더 판별
     first = [str(c or "").strip().lower() for c in rows[0]]
-    header_keywords = ["id", "아이디", "pw", "비밀번호", "password", "역할", "role"]
+    header_keywords = ["id", "아이디", "pw", "비밀번호", "password", "역할", "role", "프록시", "proxy", "라벨", "label"]
     if any(k in first for k in header_keywords):
         rows = rows[1:]
 
     accounts = load_accounts()
     added_main = 0
     added_comment = 0
+    updated_main = 0
+    updated_comment = 0
 
     for row in rows:
-        if len(row) < 2:
+        if not row or len(row) < 2:
             continue
         acc_id = str(row[0] or "").strip()
         acc_pw = str(row[1] or "").strip()
         if not acc_id or not acc_pw:
             continue
 
-        # 역할 판별: 3번째 컬럼에 "글" 포함 시 글작성자, 나머지 댓글
         role = "commenter"
         if len(row) >= 3 and row[2]:
             role_text = str(row[2]).strip()
             if "글" in role_text or "main" in role_text.lower() or "작성" in role_text:
                 role = "main"
 
-        # 중복 체크
-        if role == "main":
-            if any(m["id"] == acc_id for m in accounts["mains"]):
-                continue
-            accounts["mains"].append({
-                "id": acc_id, "pw": acc_pw,
-                "label": f"글 {len(accounts['mains']) + 1}"
-            })
-            added_main += 1
+        proxy_val = ""
+        if len(row) >= 4 and row[3]:
+            proxy_val = str(row[3]).strip()
+
+        custom_label = ""
+        if len(row) >= 5 and row[4]:
+            custom_label = str(row[4]).strip()
+
+        target_key = "mains" if role == "main" else "commenters"
+        arr = accounts[target_key]
+
+        existing = next((x for x in arr if x.get("id") == acc_id), None)
+        if existing:
+            existing["pw"] = acc_pw
+            if proxy_val or "proxy" in existing:
+                existing["proxy"] = proxy_val
+            if custom_label:
+                existing["label"] = custom_label
+            if role == "main":
+                updated_main += 1
+            else:
+                updated_comment += 1
         else:
-            if any(c["id"] == acc_id for c in accounts["commenters"]):
-                continue
-            accounts["commenters"].append({
-                "id": acc_id, "pw": acc_pw,
-                "label": f"댓글 {len(accounts['commenters']) + 1}"
+            default_label = (
+                f"글 {len(accounts['mains']) + 1}" if role == "main"
+                else f"댓글 {len(accounts['commenters']) + 1}"
+            )
+            arr.append({
+                "id": acc_id,
+                "pw": acc_pw,
+                "label": custom_label or default_label,
+                "proxy": proxy_val,
             })
-            added_comment += 1
+            if role == "main":
+                added_main += 1
+            else:
+                added_comment += 1
 
     save_accounts(accounts)
+    parts = []
+    if added_main or added_comment:
+        parts.append(f"추가: 글작성자 {added_main}개 / 댓글 {added_comment}개")
+    if updated_main or updated_comment:
+        parts.append(f"갱신: 글작성자 {updated_main}개 / 댓글 {updated_comment}개")
+    msg = ", ".join(parts) or "변경사항 없음"
     return jsonify({
         "success": True,
-        "message": f"글작성자 {added_main}개, 댓글 {added_comment}개 추가됨",
+        "message": msg,
         "added_main": added_main,
         "added_comment": added_comment,
+        "updated_main": updated_main,
+        "updated_comment": updated_comment,
     })
+
+
+@app.route("/api/accounts/excel/export", methods=["GET"])
+def export_accounts_excel():
+    """현재 계정 + 프록시 매핑 전체를 엑셀로 다운로드.
+    컬럼: ID / PW / 역할 / 프록시 / 라벨
+    """
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill
+    from io import BytesIO
+
+    accounts = load_accounts()
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "cafebot accounts"
+
+    headers = ["ID", "PW", "역할", "프록시", "라벨"]
+    ws.append(headers)
+    for col in range(1, len(headers) + 1):
+        ws.cell(row=1, column=col).font = Font(bold=True)
+        ws.cell(row=1, column=col).fill = PatternFill("solid", fgColor="E0E4FF")
+
+    for m in accounts.get("mains", []):
+        ws.append([m.get("id",""), m.get("pw",""), "글작성자", m.get("proxy",""), m.get("label","")])
+    for c in accounts.get("commenters", []):
+        ws.append([c.get("id",""), c.get("pw",""), "댓글", c.get("proxy",""), c.get("label","")])
+
+    # 컬럼 폭 자동
+    widths = [16, 14, 10, 28, 12]
+    for i, w in enumerate(widths, 1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
+
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    return Response(
+        buf.getvalue(),
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f'attachment; filename="cafebot_accounts_{ts}.xlsx"'
+        },
+    )
 
 
 @app.route("/api/comment-only/run", methods=["POST"])
@@ -269,6 +384,43 @@ def run_comment_only():
 
     threading.Thread(target=run_in_thread, daemon=True).start()
     return jsonify({"success": True, "message": f"댓글 작업 시작 ({len(exec_actions)}개 액션)"})
+
+
+@app.route("/api/proxy/healthcheck", methods=["POST"])
+def proxy_healthcheck():
+    """전체 계정 프록시 헬스체크 (네이버 접근 없음, 순수 IP 확인 서비스만)."""
+    global task_running
+    if task_running:
+        return jsonify({"error": "작업 실행 중에는 헬스체크할 수 없습니다"}), 400
+
+    accounts = load_accounts()
+
+    def log_fn(msg):
+        ts = time.strftime("%H:%M:%S")
+        log_queue.put({"type": "log", "time": ts, "message": f"[헬스체크] {msg}"})
+
+    try:
+        from modules.proxy_health import check_all_proxies
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            results = loop.run_until_complete(check_all_proxies(accounts, concurrency=5, log_fn=log_fn))
+        finally:
+            loop.close()
+    except Exception as e:
+        return jsonify({"error": f"헬스체크 오류: {e}"}), 500
+
+    # 요약 계산
+    all_rows = (results.get("mains") or []) + (results.get("commenters") or [])
+    summary = {
+        "total": len(all_rows),
+        "ok": sum(1 for r in all_rows if r["status"] == "ok"),
+        "mismatch": sum(1 for r in all_rows if r["status"] == "mismatch"),
+        "unreachable": sum(1 for r in all_rows if r["status"] == "unreachable"),
+        "no_proxy": sum(1 for r in all_rows if r["status"] == "no_proxy"),
+        "error": sum(1 for r in all_rows if r["status"] == "error"),
+    }
+    return jsonify({"success": True, "summary": summary, "results": results})
 
 
 @app.route("/api/adb/status")
@@ -370,11 +522,24 @@ def build_shuffled_exec_actions(parsed, commenter_map, main_acc, shuffle_label="
     Returns: (exec_actions, error_message_or_None)
     """
     needed_nums = list(parsed["commenter_nums"])
-    available = list(commenter_map.keys())
+    # 프록시 설정된 commenter 만 셔플 풀에 포함 (IP 미변경 방지)
+    available = [k for k, v in commenter_map.items() if (v.get("proxy") or "").strip()]
+    total = len(commenter_map)
     if len(available) < len(needed_nums):
-        return None, f"commenter 계정 부족: 필요 {len(needed_nums)}개 / 보유 {len(available)}개"
+        return None, (
+            f"프록시 설정된 commenter 부족: 필요 {len(needed_nums)}개 / "
+            f"프록시 설정됨 {len(available)}개 (전체 {total}개). "
+            "계정 관리 → 프록시 매핑에서 host:port 입력 후 저장하세요."
+        )
 
-    # 역할번호 → 실제 계정 랜덤 매핑
+    # 프록시 설정된 메인 계정인지 검증
+    if not (main_acc.get("proxy") or "").strip():
+        return None, (
+            f"글 작성자({main_acc.get('id','?')}) 에 프록시가 설정되지 않았습니다. "
+            "계정 관리 → 프록시 매핑에서 설정하세요."
+        )
+
+    # 역할번호 → 실제 계정 랜덤 매핑 (프록시 있는 계정만)
     picked = random.sample(available, len(needed_nums))
     role_to_account = {
         role: commenter_map[picked[i]]
@@ -439,6 +604,13 @@ def parse_scenario():
     missing = [n for n in parsed["commenter_nums"] if n not in commenter_map]
     mapped = {n: commenter_map[n]["id"] for n in parsed["commenter_nums"] if n in commenter_map}
 
+    # 프록시 가용성 요약 (셔플 풀 = 프록시 설정된 commenter 만)
+    proxy_ready_count = sum(
+        1 for c in accounts.get("commenters", []) if (c.get("proxy") or "").strip()
+    )
+    needed_count = len(parsed["commenter_nums"])
+    proxy_ok = proxy_ready_count >= needed_count
+
     return jsonify({
         "title": parsed["title"],
         "body": parsed["body"],
@@ -447,6 +619,9 @@ def parse_scenario():
         "image_nums": parsed.get("image_nums", []),
         "mapped_accounts": mapped,
         "missing_nums": missing,
+        "proxy_ready_count": proxy_ready_count,
+        "proxy_needed_count": needed_count,
+        "proxy_ok": proxy_ok,
     })
 
 
@@ -705,4 +880,5 @@ def run_server():
 
 
 if __name__ == "__main__":
-    app.run(debug=True, port=FLASK_PORT, threaded=True)
+    # debug=False: 파일 수정 시 자동 재시작으로 실행 중인 작업이 죽는 걸 방지
+    app.run(debug=False, port=FLASK_PORT, threaded=True, use_reloader=False)

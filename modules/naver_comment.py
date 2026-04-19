@@ -57,6 +57,48 @@ async def _scroll_to_bottom(page):
         pass
 
 
+async def count_top_comments(page, post_url, log_fn=None):
+    """게시글에 이미 있는 **최상위 댓글 개수** 반환.
+    이어하기(댓글 전용) 모드에서 to_index 오프셋 계산용.
+    """
+    def log(msg):
+        if log_fn:
+            log_fn(msg)
+
+    try:
+        if post_url not in page.url:
+            try:
+                await page.goto(post_url, wait_until="domcontentloaded", timeout=30000)
+            except Exception:
+                pass
+            await human_delay(2, 4)
+            await _scroll_to_bottom(page)
+
+        total = 0
+        for t in [page] + list(page.frames):
+            try:
+                n = await t.evaluate("""
+                    () => {
+                        const items = Array.from(document.querySelectorAll('li.CommentItem'));
+                        let count = 0;
+                        items.forEach(el => {
+                            const cls = (el.className || '').toLowerCase();
+                            if (!cls.includes('reply') && !cls.includes('answer')) count++;
+                        });
+                        return count;
+                    }
+                """)
+                if n and n > total:
+                    total = n
+            except Exception:
+                continue
+        log(f"기존 최상위 댓글 수: {total}")
+        return total
+    except Exception as e:
+        log(f"댓글 수 집계 오류: {e}")
+        return 0
+
+
 async def write_comment(page, post_url, comment_text, log_fn=None):
     """Write a top-level comment."""
     def log(msg):

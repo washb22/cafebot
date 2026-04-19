@@ -21,6 +21,7 @@
   .status-dot { width:8px; height:8px; border-radius:50%; display:inline-block; }
   .status-dot.on { background:var(--success); }
   .status-dot.off { background:var(--danger); }
+  .status-dot.warn { background:#ffc107; }
 
   .layout { display:grid; grid-template-columns:1fr 380px; height:calc(100vh - 52px); }
 
@@ -163,8 +164,8 @@
 <nav>
   <div class="nav-logo">CafeBot</div>
   <div class="nav-status">
-    <span>ADB: <span class="status-dot" id="adbDot"></span> <span id="adbText">확인 중</span></span>
-    <span>IP: <span id="currentIp">-</span></span>
+    <span>프록시: <span class="status-dot" id="proxyDot"></span> <span id="proxyText">확인 중</span></span>
+    <span>PC IP: <span id="currentIp">-</span></span>
     <span id="licenseBadge" class="license-badge" onclick="showLicenseModal()" style="display:none"></span>
   </div>
 </nav>
@@ -199,9 +200,44 @@
       </div>
       <div style="margin-top:8px;display:flex;gap:6px;align-items:center">
         <input type="file" id="excelFile" accept=".xlsx,.xls" class="form-input" style="flex:1">
-        <button class="btn btn-outline btn-sm" onclick="uploadExcel()">엑셀 일괄등록</button>
+        <button class="btn btn-outline btn-sm" onclick="uploadExcel()">엑셀 업로드</button>
       </div>
-      <div style="font-size:10px;color:var(--muted);margin-top:4px">엑셀 형식: A열=ID, B열=PW, C열=역할(선택, "글작성자" 또는 비우면 댓글)</div>
+      <div style="font-size:10px;color:var(--muted);margin-top:4px">
+        A열=ID, B열=PW 만 있어도 됨 (구 포맷 호환). C=역할, D=프록시, E=라벨 컬럼 있으면 함께 반영. 기존 ID 는 정보만 갱신됨.
+      </div>
+
+      <!-- 프록시 매핑 -->
+      <details style="margin-top:12px;border:1px solid var(--border);border-radius:8px;padding:8px 10px;background:rgba(0,0,0,0.15)">
+        <summary style="cursor:pointer;font-size:12px;font-weight:700;color:var(--accent)">
+          🌐 프록시 매핑 <span id="proxyStats" style="font-weight:400;color:var(--muted);margin-left:8px"></span>
+        </summary>
+        <div style="font-size:11px;color:var(--muted);margin:8px 0">
+          각 계정마다 고정 프록시(IP:PORT)를 지정하세요. 예: <code>125.7.181.170:15648</code>.
+          입력하지 않으면 PC 직접 IP 로 접속합니다. (일괄 붙여넣기: 한 줄에 하나씩, 순서대로 매핑됨)
+        </div>
+        <div style="display:flex;gap:6px;margin-bottom:8px">
+          <textarea id="proxyBulkText" class="form-input" rows="4" placeholder="125.7.181.170:15648&#10;183.78.130.60:23156&#10;..." style="flex:1;font-family:monospace;font-size:11px"></textarea>
+          <div style="display:flex;flex-direction:column;gap:4px">
+            <button class="btn btn-outline btn-sm" onclick="applyBulkProxies()" type="button">댓글 계정에 일괄 적용</button>
+            <button class="btn btn-outline btn-sm" onclick="loadProxyListFromCurrent()" type="button">현재값 불러오기</button>
+          </div>
+        </div>
+        <div id="proxyMapList"></div>
+        <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;align-items:center">
+          <button class="btn btn-primary btn-sm" onclick="saveAllProxies()" type="button">프록시 저장</button>
+          <button class="btn btn-outline btn-sm" onclick="runProxyHealthcheck()" type="button" id="btnHealthcheck" title="모든 프록시의 연결/IP 일치만 확인 (네이버 접근 없음)">🩺 프록시 상태 확인</button>
+          <div style="flex:1"></div>
+          <button class="btn btn-outline btn-sm" onclick="downloadAccountsExcel()" type="button" title="ID/PW/역할/프록시/라벨 전체를 엑셀로 저장 — 다른 PC 이전용">⬇ 엑셀 다운로드</button>
+          <label class="btn btn-outline btn-sm" style="cursor:pointer;margin:0" title="다운로드한 엑셀을 업로드하면 계정+프록시 복원/갱신">
+            ⬆ 엑셀 업로드
+            <input type="file" accept=".xlsx,.xls" style="display:none" onchange="uploadAccountsBackup(this)">
+          </label>
+        </div>
+        <div id="proxyHealthResult" style="margin-top:8px;display:none;padding:8px;background:rgba(0,0,0,0.2);border-radius:6px;font-size:11px;max-height:300px;overflow-y:auto"></div>
+        <div style="font-size:10px;color:var(--muted);margin-top:4px">
+          💡 다른 컴퓨터로 이전: 현재 PC 에서 <b>엑셀 다운로드</b> → 새 PC 에서 아이피몬스터 인증IP 갱신 → cafebot 에서 <b>엑셀 업로드</b>
+        </div>
+      </details>
     </div>
 
     <!-- TXT 파일 배치 큐 -->
@@ -490,6 +526,83 @@ async function loadAccounts() {
   renderAccounts();
   updateMainSelects();
   renderAccountChips();
+  renderProxyMap();
+}
+
+// ── Proxy mapping ──
+function renderProxyMap() {
+  const el = document.getElementById('proxyMapList');
+  if (!el) return;
+  const rows = [];
+  accounts.mains.forEach((m, i) => {
+    rows.push(proxyRowHtml('main', i, `글${i+1}`, m.id, m.proxy || ''));
+  });
+  accounts.commenters.forEach((c, i) => {
+    rows.push(proxyRowHtml('commenter', i, `댓글${i+1}`, c.id, c.proxy || ''));
+  });
+  el.innerHTML = rows.join('') || '<span style="font-size:11px;color:var(--muted)">등록된 계정이 없습니다</span>';
+  updateProxyStats();
+}
+
+function proxyRowHtml(type, idx, roleLabel, id, proxy) {
+  return `<div style="display:flex;gap:6px;align-items:center;margin-bottom:4px">
+    <span style="flex:0 0 50px;font-size:11px;color:var(--accent);font-weight:700">${roleLabel}</span>
+    <span style="flex:0 0 120px;font-size:11px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${id}</span>
+    <input class="form-input" data-type="${type}" data-idx="${idx}" value="${proxy.replace(/"/g,'&quot;')}" placeholder="host:port (비우면 직접 IP)" style="flex:1;font-family:monospace;font-size:11px;padding:4px 8px">
+  </div>`;
+}
+
+function updateProxyStats() {
+  const total = accounts.mains.length + accounts.commenters.length;
+  const filled = [...accounts.mains, ...accounts.commenters].filter(a => (a.proxy||'').trim()).length;
+  const el = document.getElementById('proxyStats');
+  if (el) el.textContent = `(${filled}/${total} 설정됨)`;
+}
+
+function loadProxyListFromCurrent() {
+  // 현재 입력된 commenter proxy 들을 textarea 에 채움
+  const lines = accounts.commenters.map(c => c.proxy || '');
+  document.getElementById('proxyBulkText').value = lines.join('\n');
+}
+
+function applyBulkProxies() {
+  // textarea 각 줄을 commenter 순서대로 입력창에 반영 (저장은 별도)
+  const lines = document.getElementById('proxyBulkText').value.split(/\r?\n/);
+  const inputs = document.querySelectorAll('#proxyMapList input[data-type="commenter"]');
+  inputs.forEach((inp, i) => {
+    inp.value = (lines[i] || '').trim();
+  });
+}
+
+async function saveAllProxies() {
+  const inputs = document.querySelectorAll('#proxyMapList input[data-type]');
+  const mainsArr = new Array(accounts.mains.length).fill('');
+  const commentersArr = new Array(accounts.commenters.length).fill('');
+  inputs.forEach(inp => {
+    const t = inp.dataset.type, i = parseInt(inp.dataset.idx, 10);
+    const v = (inp.value || '').trim();
+    if (t === 'main' && i < mainsArr.length) mainsArr[i] = v;
+    if (t === 'commenter' && i < commentersArr.length) commentersArr[i] = v;
+  });
+  try {
+    const res = await fetch('/api/accounts/proxy/bulk', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ mains: mainsArr, commenters: commentersArr })
+    });
+    const data = await res.json();
+    if (data.success) {
+      // 메모리에도 반영
+      accounts.mains.forEach((m,i) => m.proxy = mainsArr[i]);
+      accounts.commenters.forEach((c,i) => c.proxy = commentersArr[i]);
+      updateProxyStats();
+      alert('프록시 저장 완료');
+    } else {
+      alert('저장 실패: ' + (data.error || ''));
+    }
+  } catch(e) {
+    alert('저장 오류: ' + e.message);
+  }
 }
 
 function renderAccounts() {
@@ -518,6 +631,97 @@ async function uploadExcel() {
     fileInput.value = '';
     await loadAccounts();
   } catch(e) { alert('업로드 오류: ' + e.message); }
+}
+
+async function runProxyHealthcheck() {
+  const btn = document.getElementById('btnHealthcheck');
+  const panel = document.getElementById('proxyHealthResult');
+  if (btn.disabled) return;
+  btn.disabled = true;
+  btn.textContent = '🔄 확인 중... (30~60초 소요)';
+  panel.style.display = 'block';
+  panel.innerHTML = '<span style="color:var(--muted)">프록시 테스트 중... 로그 창에서 진행 상황 확인 가능</span>';
+  try {
+    const res = await fetch('/api/proxy/healthcheck', { method: 'POST' });
+    const data = await res.json();
+    if (data.error) {
+      panel.innerHTML = `<span style="color:#dc3545">오류: ${data.error}</span>`;
+      return;
+    }
+    const s = data.summary;
+    const rows = [];
+    const fmt = (r) => {
+      const icon = {ok:'🟢', mismatch:'🟡', unreachable:'🔴', no_proxy:'⚪', error:'⚠️'}[r.status] || '?';
+      const color = {ok:'#28a745', mismatch:'#ffc107', unreachable:'#dc3545', no_proxy:'#888', error:'#dc3545'}[r.status] || '#888';
+      const latency = r.latency_ms ? ` ${r.latency_ms}ms` : '';
+      const extra = r.status === 'mismatch' ? ` (실제: ${r.actual})` :
+                    r.status === 'unreachable' ? ` (${r.error||'응답없음'})` :
+                    r.status === 'no_proxy' ? ' (프록시 미설정)' :
+                    r.status === 'error' ? ` (${r.error})` : latency;
+      return `<div style="display:flex;gap:8px;padding:3px 0;color:${color};font-family:monospace">
+        <span>${icon}</span>
+        <span style="flex:0 0 60px;font-weight:700">${r.label}</span>
+        <span style="flex:0 0 120px">${r.id}</span>
+        <span style="flex:1">${r.proxy || '(없음)'}${extra}</span>
+      </div>`;
+    };
+    (data.results.mains||[]).forEach(r => rows.push(fmt(r)));
+    (data.results.commenters||[]).forEach(r => rows.push(fmt(r)));
+    panel.innerHTML = `
+      <div style="margin-bottom:8px;font-weight:700">
+        🟢 정상 ${s.ok} / 🟡 IP불일치 ${s.mismatch} / 🔴 응답없음 ${s.unreachable} / ⚪ 미설정 ${s.no_proxy} / ⚠️ 오류 ${s.error} (총 ${s.total})
+      </div>
+      ${rows.join('')}`;
+  } catch(e) {
+    panel.innerHTML = `<span style="color:#dc3545">오류: ${e.message}</span>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '🩺 프록시 상태 확인';
+  }
+}
+
+async function uploadAccountsBackup(inputEl) {
+  // 프록시 매핑 섹션의 엑셀 복원 전용 - 업로드 후 전체 accounts 재로드
+  const f = inputEl.files[0];
+  if (!f) return;
+  if (!confirm(`"${f.name}" 을 업로드해 계정/프록시를 복원할까요? 같은 ID 는 덮어쓰고, 새 ID 는 추가됩니다.`)) {
+    inputEl.value = '';
+    return;
+  }
+  const fd = new FormData();
+  fd.append('file', f);
+  try {
+    const res = await fetch('/api/accounts/excel', { method: 'POST', body: fd });
+    const data = await res.json();
+    if (data.error) { alert('오류: ' + data.error); return; }
+    alert('복원 완료: ' + data.message);
+    await loadAccounts();
+  } catch(e) {
+    alert('업로드 오류: ' + e.message);
+  } finally {
+    inputEl.value = '';
+  }
+}
+
+async function downloadAccountsExcel() {
+  // 백그라운드 작업 중에도 동작 (읽기 전용)
+  try {
+    const resp = await fetch('/api/accounts/excel/export');
+    if (!resp.ok) { alert('다운로드 실패: ' + resp.status); return; }
+    const blob = await resp.blob();
+    // 서버가 Content-Disposition 에 파일명 주지만, 브라우저가 못 읽는 경우 있어 수동 지정
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const ts = new Date().toISOString().replace(/[-:T.Z]/g,'').slice(0,14);
+    a.download = `cafebot_accounts_${ts}.xlsx`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  } catch(e) {
+    alert('다운로드 오류: ' + e.message);
+  }
 }
 
 function updateMainSelects() {
@@ -555,6 +759,7 @@ async function addAccount() {
   renderAccounts();
   updateMainSelects();
   updateCommentSelects();
+  renderProxyMap();
 }
 
 async function removeAccount(type, idx) {
@@ -567,6 +772,7 @@ async function removeAccount(type, idx) {
   renderAccounts();
   updateMainSelects();
   updateCommentSelects();
+  renderProxyMap();
 }
 
 // ── Mode ──
@@ -618,16 +824,35 @@ function addReplyRow() {
   container.appendChild(div);
 }
 
-// ── ADB Status ──
+// ── Proxy / PC IP status ──
 async function checkAdb() {
+  // 이름 유지(호출부 호환) - 실제로는 프록시/IP 상태 갱신
   try {
     const res = await fetch('/api/adb/status');
     const data = await res.json();
-    document.getElementById('adbDot').className = 'status-dot ' + (data.connected ? 'on' : 'off');
-    document.getElementById('adbText').textContent = data.connected ? '연결됨' : '미연결';
     document.getElementById('currentIp').textContent = data.ip || '-';
+  } catch(e) {}
+  try {
+    const total = (accounts.mains?.length || 0) + (accounts.commenters?.length || 0);
+    const filled = [...(accounts.mains||[]), ...(accounts.commenters||[])]
+      .filter(a => (a.proxy||'').trim()).length;
+    const dot = document.getElementById('proxyDot');
+    const txt = document.getElementById('proxyText');
+    if (total === 0) {
+      dot.className = 'status-dot off';
+      txt.textContent = '계정 없음';
+    } else if (filled === 0) {
+      dot.className = 'status-dot off';
+      txt.textContent = `0/${total} 미설정`;
+    } else if (filled < total) {
+      dot.className = 'status-dot warn';
+      txt.textContent = `${filled}/${total} 부분설정`;
+    } else {
+      dot.className = 'status-dot on';
+      txt.textContent = `${filled}/${total} 완료`;
+    }
   } catch(e) {
-    document.getElementById('adbText').textContent = '오류';
+    document.getElementById('proxyText').textContent = '오류';
   }
 }
 
@@ -962,6 +1187,11 @@ async function previewScenario() {
     const missingStr = data.missing_nums.length
       ? `<div style="color:#dc3545;margin-top:6px">⚠ 미등록 계정: 댓글 ${data.missing_nums.join(', ')}</div>`
       : `<div style="color:#28a745;margin-top:6px">✓ 필요 계정 모두 등록됨</div>`;
+    const proxyStr = (typeof data.proxy_ok === 'boolean')
+      ? (data.proxy_ok
+          ? `<div style="color:#28a745;margin-top:6px">✓ 프록시 가용: ${data.proxy_ready_count}/${data.proxy_needed_count} (필요 수 충족)</div>`
+          : `<div style="color:#dc3545;margin-top:6px">⚠ 프록시 부족: ${data.proxy_ready_count}/${data.proxy_needed_count} (프록시 설정된 commenter 부족)</div>`)
+      : '';
     const imgNums = data.image_nums || [];
     const imgStr = imgNums.length
       ? `<div style="color:#7c6fff;margin-top:6px">📷 본문 이미지 마커: ${imgNums.map(n => `[이미지${n}]`).join(', ')}</div>`
@@ -973,12 +1203,13 @@ async function previewScenario() {
       <div><strong>필요 commenter:</strong> ${data.commenter_nums.join(', ')}</div>
       ${imgStr}
       ${missingStr}
+      ${proxyStr}
     `;
     preview.style.display = 'block';
     scenarioImageNums = imgNums;
     scenarioParsed = data;
     renderImageSlots();
-    btn.disabled = data.missing_nums.length > 0;
+    btn.disabled = data.missing_nums.length > 0 || data.proxy_ok === false;
   } catch (e) {
     preview.innerHTML = `<span style="color:#dc3545">업로드 오류: ${e}</span>`;
     preview.style.display = 'block';
@@ -1230,13 +1461,19 @@ async function previewCommentOnly() {
     const missingStr = data.missing_nums.length
       ? `<div style="color:#dc3545;margin-top:6px">⚠ 미등록 계정: 댓글 ${data.missing_nums.join(', ')}</div>`
       : `<div style="color:#28a745;margin-top:6px">✓ 필요 계정 모두 등록됨</div>`;
+    const proxyStr = (typeof data.proxy_ok === 'boolean')
+      ? (data.proxy_ok
+          ? `<div style="color:#28a745;margin-top:6px">✓ 프록시 가용: ${data.proxy_ready_count}/${data.proxy_needed_count}</div>`
+          : `<div style="color:#dc3545;margin-top:6px">⚠ 프록시 부족: ${data.proxy_ready_count}/${data.proxy_needed_count}</div>`)
+      : '';
     preview.innerHTML = `
       <div><strong>댓글 ${commentCount}개</strong> / <strong>대댓글 ${replyCount}개</strong> / 총 ${data.actions.length}개 액션</div>
       <div><strong>필요 commenter:</strong> ${data.commenter_nums.join(', ')}</div>
-      ${missingStr}`;
+      ${missingStr}
+      ${proxyStr}`;
     preview.style.display = 'block';
     commentOnlyParsed = data;
-    btn.disabled = data.missing_nums.length > 0;
+    btn.disabled = data.missing_nums.length > 0 || data.proxy_ok === false;
   } catch(e) {
     preview.innerHTML = `<span style="color:#dc3545">오류: ${e}</span>`;
     preview.style.display = 'block'; btn.disabled = true; commentOnlyParsed = null;

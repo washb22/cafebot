@@ -36,24 +36,44 @@ TITLE_RE = re.compile(r'^\s*제목\s*:\s*(.+)$')
 
 
 def parse_scenario_text(text):
-    """txt 콘텐츠 문자열을 파싱해 시나리오 dict 반환"""
+    """txt 콘텐츠 문자열을 파싱해 시나리오 dict 반환.
+
+    두 가지 형식 지원:
+    1) 풀 시나리오: '제목:' + '---' + 본문 + '---' + 댓글... (글 작성+댓글)
+    2) 댓글 전용:  '---' 구분자 없이 '댓글N:' 줄만 나열 (이미 있는 글에 댓글만 달기)
+    """
     # 빈줄 정리 + \r 제거
     text = text.replace('\r\n', '\n').replace('\r', '\n')
 
-    # --- 기준으로 분할: [title_part, body, comments_part] 형태
+    # --- 기준으로 분할
     sections = text.split('---')
-    if len(sections) < 3:
-        raise ValueError("파일 형식 오류: '---' 구분자가 2개 이상 있어야 합니다 (제목/본문/댓글 구분)")
 
-    title_part = sections[0].strip()
-    body = sections[1].strip()
-    comments_part = '---'.join(sections[2:]).strip()  # 혹시 댓글 안에 --- 있어도 남김
+    if len(sections) >= 3:
+        # 풀 시나리오 모드
+        title_part = sections[0].strip()
+        body = sections[1].strip()
+        comments_part = '---'.join(sections[2:]).strip()
 
-    # 제목 추출
-    title_match = TITLE_RE.match(title_part)
-    if not title_match:
-        raise ValueError("제목을 찾을 수 없습니다. '제목 : ...' 형식이어야 합니다.")
-    title = title_match.group(1).strip()
+        title_match = TITLE_RE.match(title_part)
+        if not title_match:
+            raise ValueError("제목을 찾을 수 없습니다. '제목 : ...' 형식이어야 합니다.")
+        title = title_match.group(1).strip()
+    else:
+        # 댓글 전용 모드: 전체를 comments_part 로 취급, 제목/본문은 빈값
+        title = ""
+        body = ""
+        comments_part = text.strip()
+
+        # 유효성: 댓글 줄이 하나라도 있는지
+        has_comment_line = any(
+            COMMENT_RE.match(ln) or AUTHOR_REPLY_RE.match(ln) or COMMENTER_REPLY_RE.match(ln)
+            for ln in comments_part.split('\n')
+        )
+        if not has_comment_line:
+            raise ValueError(
+                "댓글 형식을 찾을 수 없습니다. 풀 시나리오는 '제목:' + '---' + 본문 + '---' + 댓글 형식, "
+                "댓글 전용은 '댓글1: ...' 줄만 나열하세요."
+            )
 
     # 본문 내 이미지 마커 수집 — [이미지1], [이미지2], ... 등
     image_marker_re = re.compile(r'\[이미지(\d+)\]')
