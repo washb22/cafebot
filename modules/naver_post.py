@@ -8,6 +8,42 @@ async def human_delay(min_s=0.5, max_s=1.5):
     await asyncio.sleep(random.uniform(min_s, max_s))
 
 
+async def _wait_popup_dim_gone(page, log=None, max_wait=10):
+    """SmartEditor 오버레이 (se-popup-dim) 가 사라질 때까지 대기.
+    이미지 업로드/카테고리 선택 등 팝업이 pointer events 가로챔 → 등록 클릭 실패 방지.
+    ESC 시도 후에도 남아있으면 return (호출자가 force click 으로 폴백).
+    """
+    for i in range(max_wait):
+        try:
+            found = False
+            for t in [page] + list(page.frames):
+                try:
+                    el = await t.query_selector('.se-popup-dim, .se-popup-dim-white')
+                    if el:
+                        box = await el.bounding_box()
+                        if box and box['width'] > 50:
+                            found = True
+                            break
+                except Exception:
+                    continue
+            if not found:
+                if i > 0 and log:
+                    log(f"  팝업 오버레이 해제 대기 {i}초 후 해제됨")
+                return True
+            # 오버레이 있으면 ESC 시도
+            if i == 2:
+                try:
+                    await page.keyboard.press("Escape")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        await asyncio.sleep(1)
+    if log:
+        log("⚠ 팝업 오버레이가 여전히 남아있음 (force click 폴백 예정)")
+    return False
+
+
 def normalize_to_write_url(url):
     """게시판 URL → 글쓰기 URL 변환.
     - 이미 write URL이면 그대로
@@ -295,7 +331,16 @@ async def write_post(page, cafe_url, title, body, board_name=None, log_fn=None, 
             return None
 
         log("발행 중...")
-        await pub_el.click()
+        await _wait_popup_dim_gone(page, log)
+        try:
+            await pub_el.click(timeout=15000)
+        except Exception as e:
+            log(f"⚠ 일반 클릭 실패 → force 클릭 재시도: {str(e)[:60]}")
+            try:
+                await pub_el.click(force=True, timeout=10000)
+            except Exception as e2:
+                log(f"❌ force 클릭도 실패: {str(e2)[:80]}")
+                return None
 
         # URL 이동 확인 (write 페이지에서 벗어나야 함)
         for _ in range(15):
@@ -510,7 +555,16 @@ async def edit_post(page, post_url, title, body, log_fn=None, image_map=None):
             return None
 
         log("수정 발행 중...")
-        await pub_el.click()
+        await _wait_popup_dim_gone(page, log)
+        try:
+            await pub_el.click(timeout=15000)
+        except Exception as e:
+            log(f"⚠ 일반 클릭 실패 → force 클릭 재시도: {str(e)[:60]}")
+            try:
+                await pub_el.click(force=True, timeout=10000)
+            except Exception as e2:
+                log(f"❌ force 클릭도 실패: {str(e2)[:80]}")
+                return None
 
         # URL 이동 확인 (write 페이지에서 벗어나야 함)
         for _ in range(15):

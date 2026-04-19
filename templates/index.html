@@ -396,6 +396,7 @@
           <option value="all">전체</option>
           <option value="error">에러만</option>
         </select>
+        <button class="btn btn-outline btn-sm" onclick="downloadLog()" title="현재까지의 전체 로그를 텍스트 파일로 저장">⬇ 로그 저장</button>
         <button class="btn btn-outline btn-sm" onclick="clearLog()">지우기</button>
       </div>
     </div>
@@ -633,6 +634,43 @@ async function uploadExcel() {
   } catch(e) { alert('업로드 오류: ' + e.message); }
 }
 
+function downloadHealthResult() {
+  const data = window.__lastHealthResult;
+  if (!data) { alert('저장할 결과가 없습니다'); return; }
+  const s = data.summary;
+  const statusKo = {ok:'정상', mismatch:'IP불일치', unreachable:'응답없음', no_proxy:'미설정', error:'오류'};
+  const rowToLine = (r) => {
+    const st = statusKo[r.status] || r.status;
+    const latency = r.latency_ms ? `${r.latency_ms}ms` : '-';
+    const extra = r.error ? ` | ${r.error}` : (r.actual && r.actual !== r.expected ? ` | 실제=${r.actual}` : '');
+    return `[${st}]\t${r.label}\t${r.id}\t${r.proxy || '(없음)'}\t기대=${r.expected || '-'}\t${latency}${extra}`;
+  };
+  const lines = [
+    `# CafeBot 프록시 헬스체크 결과`,
+    `# 생성: ${new Date().toLocaleString('ko-KR')}`,
+    `# 요약: 정상 ${s.ok} / IP불일치 ${s.mismatch} / 응답없음 ${s.unreachable} / 미설정 ${s.no_proxy} / 오류 ${s.error} (총 ${s.total})`,
+    ``,
+    `[상태]\t라벨\tID\t프록시\t기대IP\t응답시간\t비고`,
+    `# --- 글 작성자 ---`,
+    ...(data.results.mains||[]).map(rowToLine),
+    `# --- 댓글 ---`,
+    ...(data.results.commenters||[]).map(rowToLine),
+    ``,
+    `# 🔴/🟡/⚠️ 표시된 IP 는 아이피몬스터 고객센터에 교체 요청하세요.`,
+  ];
+  const text = lines.join('\n');
+  const ts = new Date().toISOString().replace(/[-:T.Z]/g,'').slice(0,14);
+  const blob = new Blob([text], {type: 'text/plain;charset=utf-8'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `cafebot_proxy_check_${ts}.txt`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 async function runProxyHealthcheck() {
   const btn = document.getElementById('btnHealthcheck');
   const panel = document.getElementById('proxyHealthResult');
@@ -667,9 +705,14 @@ async function runProxyHealthcheck() {
     };
     (data.results.mains||[]).forEach(r => rows.push(fmt(r)));
     (data.results.commenters||[]).forEach(r => rows.push(fmt(r)));
+    // 다운로드용 텍스트 별도 구성
+    window.__lastHealthResult = data;
     panel.innerHTML = `
-      <div style="margin-bottom:8px;font-weight:700">
-        🟢 정상 ${s.ok} / 🟡 IP불일치 ${s.mismatch} / 🔴 응답없음 ${s.unreachable} / ⚪ 미설정 ${s.no_proxy} / ⚠️ 오류 ${s.error} (총 ${s.total})
+      <div style="margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;gap:6px">
+        <span style="font-weight:700">
+          🟢 정상 ${s.ok} / 🟡 IP불일치 ${s.mismatch} / 🔴 응답없음 ${s.unreachable} / ⚪ 미설정 ${s.no_proxy} / ⚠️ 오류 ${s.error} (총 ${s.total})
+        </span>
+        <button class="btn btn-outline btn-sm" onclick="downloadHealthResult()" type="button">⬇ 결과 저장</button>
       </div>
       ${rows.join('')}`;
   } catch(e) {
@@ -875,6 +918,28 @@ function classifyLog(msg) {
   // 중요 로그: ━━━ 구분선, ═════ 배치, ╔═══ 글, [계정셔플]
   if (msg.includes('━━━') || msg.includes('═══') || msg.includes('[계정셔플')) return 'important';
   return '';
+}
+
+function downloadLog() {
+  const body = document.getElementById('logBody');
+  const lines = [];
+  body.querySelectorAll('.log-line').forEach(el => {
+    const t = el.querySelector('.log-time')?.textContent || '';
+    const m = el.querySelector('.log-msg')?.textContent || '';
+    lines.push(`${t}\t${m}`);
+  });
+  if (lines.length === 0) { alert('저장할 로그가 없습니다'); return; }
+  const ts = new Date().toISOString().replace(/[-:T.Z]/g,'').slice(0,14);
+  const text = `# CafeBot 실행 로그\n# 생성: ${new Date().toLocaleString('ko-KR')}\n# 총 ${lines.length} 줄\n\n` + lines.join('\n');
+  const blob = new Blob([text], {type: 'text/plain;charset=utf-8'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `cafebot_log_${ts}.txt`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
 function addLog(time, msg) {

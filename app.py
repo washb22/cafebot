@@ -199,7 +199,11 @@ def upload_accounts_excel():
         role = "commenter"
         if len(row) >= 3 and row[2]:
             role_text = str(row[2]).strip()
-            if "글" in role_text or "main" in role_text.lower() or "작성" in role_text:
+            low = role_text.lower()
+            # 댓글 계정은 '댓글' 문자열이 포함됨 → 우선 커멘터로 고정
+            if "댓글" in role_text or "reply" in low or "comment" in low:
+                role = "commenter"
+            elif "글작성" in role_text or "작성자" in role_text or "main" in low:
                 role = "main"
 
         proxy_val = ""

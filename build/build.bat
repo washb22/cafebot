@@ -13,9 +13,9 @@ if exist dist rmdir /s /q dist
 if exist build_temp rmdir /s /q build_temp
 if exist dist_obf rmdir /s /q dist_obf
 
-REM Step 2: PyArmor 난독화
+REM Step 2: PyArmor 난독화 (modules 폴더 통째로 전달해 하위구조 보존)
 echo [2/5] PyArmor 코드 난독화...
-pyarmor gen --output dist_obf -r main.py app.py config.py modules\__init__.py modules\license.py modules\browser.py modules\naver_auth.py modules\naver_post.py modules\naver_comment.py modules\adb_network.py modules\task_runner.py modules\txt_parser.py
+pyarmor gen --output dist_obf -r main.py app.py config.py modules
 if errorlevel 1 (
     echo 오류: PyArmor 난독화 실패
     pause
@@ -49,9 +49,26 @@ REM Playwright 브라우저 복사
 echo 브라우저 번들링 (약 400MB, 시간 소요)...
 xcopy "%LOCALAPPDATA%\ms-playwright\chromium-1208" "dist\CafeBot\browsers\chromium-1208\" /E /I /Y >nul
 
+REM Step 6: Inno Setup 인스톨러 생성
+echo [6/6] Inno Setup 인스톨러 빌드...
+set ISCC="C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+if not exist %ISCC% (
+    echo 경고: Inno Setup 미설치 - 인스톨러 생략
+    goto :END
+)
+%ISCC% build\installer.iss
+if errorlevel 1 (
+    echo 오류: Inno Setup 빌드 실패
+    pause
+    exit /b 1
+)
+
+:END
 echo.
 echo ========================================
-echo   빌드 완료! dist\CafeBot 폴더 확인
+echo   빌드 완료!
+echo   - 실행 폴더: dist\CafeBot
+echo   - 인스톨러 : installer_output\CafeBot_Setup_v1.1.exe
 echo ========================================
 echo.
 pause
