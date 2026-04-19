@@ -5,6 +5,13 @@ import pyperclip
 from config import SELECTORS
 
 
+class CaptchaDetected(Exception):
+    """캡챠 감지 - 브라우저 세션을 완전히 새로 열어 재시도 필요."""
+    def __init__(self, account_id=""):
+        super().__init__(f"captcha detected for {account_id[:3]}***")
+        self.account_id = account_id
+
+
 async def human_delay(min_s=0.5, max_s=1.5):
     await asyncio.sleep(random.uniform(min_s, max_s))
 
@@ -52,19 +59,19 @@ async def naver_login(page, account_id, account_pw, log_fn=None):
 
         # Wait for navigation (timeout은 무시하고 다음 체크로 진행)
         try:
-            await page.wait_for_load_state("domcontentloaded", timeout=10000)
+            await page.wait_for_load_state("domcontentloaded", timeout=7000)
         except Exception:
             pass
         try:
-            await page.wait_for_load_state("networkidle", timeout=10000)
+            await page.wait_for_load_state("networkidle", timeout=5000)
         except Exception:
             log("⚠ networkidle 대기 타임아웃 (무시하고 진행)")
 
-        # Check for CAPTCHA
+        # Check for CAPTCHA — 감지 시 예외로 상위에 알림 (새 세션으로 재시도 유도)
         captcha = await page.query_selector(SELECTORS["login_captcha"])
         if captcha:
-            log("⚠ 캡차 감지! 폰/컴퓨터로 직접 풀어주세요 - 60초 대기")
-            await asyncio.sleep(60)
+            log("⚠ 캡차 감지 → 브라우저 재시작으로 자동 재시도")
+            raise CaptchaDetected(account_id)
 
         # Check for 새 기기 등록 / 2단계 인증 화면
         extra_auth_indicators = [

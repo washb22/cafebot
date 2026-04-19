@@ -17,17 +17,16 @@ if not os.path.exists(ADB_PATH):
     ADB_PATH = "adb"
 
 # Delay ranges (seconds) - min, max
-# 프록시 방식은 IP 변경 대기가 없어 전체 속도가 매우 빠르므로
-# between_accounts 를 사람 수준으로 늘려 네이버 봇 탐지를 회피한다.
+# 프록시 방식 속도 튜닝: 사람 속도 유지하되 불필요한 여유 제거
 DEFAULT_DELAYS = {
-    "after_login": (3, 6),          # 로그인 후 바로 글/댓글 안 쓰고 잠깐 대기
-    "before_typing": (0.8, 2.0),    # 커서 놓고 타이핑 시작하기 전
-    "typing_char_delay": (0.030, 0.080),  # 글자 입력 간격 (좀 더 사람처럼)
-    "after_post_submit": (2, 4),
-    "after_comment_submit": (1.5, 3),
+    "after_login": (2, 4),
+    "before_typing": (0.5, 1.2),
+    "typing_char_delay": (0.020, 0.055),
+    "after_post_submit": (1.5, 3),
+    "after_comment_submit": (1.2, 2.5),
     "after_browser_close": (0.5, 1),
-    "airplane_toggle_wait": (3, 6),  # 사용 안함 (비행기모드 모드용)
-    "between_accounts": (18, 35),    # 계정 전환 간격 (핵심) - 사람 속도로
+    "airplane_toggle_wait": (3, 6),  # 사용 안함
+    "between_accounts": (12, 25),    # 계정 전환 간격 (핵심)
 }
 
 # Naver selectors

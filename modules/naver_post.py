@@ -8,6 +8,37 @@ async def human_delay(min_s=0.5, max_s=1.5):
     await asyncio.sleep(random.uniform(min_s, max_s))
 
 
+async def _cleanup_residual_ui(page, log=None):
+    """글 작성/수정 완료 후 SmartEditor 잔재 (이미지 모달, 오버레이, 토스트) 강제 정리.
+    Chrome #1 지속 세션에서 특히 필요 (브라우저가 안 닫히므로 모달이 다음 작업까지 남음).
+    """
+    try:
+        # ESC 3회로 모달/드롭다운 닫기
+        for _ in range(3):
+            try:
+                await page.keyboard.press("Escape")
+                await asyncio.sleep(0.2)
+            except Exception:
+                pass
+        # se-popup-dim / 이미지 업로드 모달 잔재 DOM 제거
+        try:
+            await page.evaluate("""
+                () => {
+                    const sel = '.se-popup-dim, .se-popup-dim-white, .se-photo-modal, [class*="photo-modal"], [class*="image-modal"]';
+                    document.querySelectorAll(sel).forEach(el => {
+                        try { el.remove(); } catch(e) {}
+                    });
+                }
+            """)
+        except Exception:
+            pass
+        await asyncio.sleep(0.5)
+        if log:
+            log("  (모달/오버레이 정리 완료)")
+    except Exception:
+        pass
+
+
 async def _wait_popup_dim_gone(page, log=None, max_wait=10):
     """SmartEditor 오버레이 (se-popup-dim) 가 사라질 때까지 대기.
     이미지 업로드/카테고리 선택 등 팝업이 pointer events 가로챔 → 등록 클릭 실패 방지.
@@ -355,6 +386,7 @@ async def write_post(page, cafe_url, title, body, board_name=None, log_fn=None, 
             return None
 
         log(f"글 작성 완료: {post_url}")
+        await _cleanup_residual_ui(page, log)
         return post_url
 
     except Exception as e:
@@ -566,19 +598,22 @@ async def edit_post(page, post_url, title, body, log_fn=None, image_map=None):
                 log(f"❌ force 클릭도 실패: {str(e2)[:80]}")
                 return None
 
-        # URL 이동 확인 (write 페이지에서 벗어나야 함)
+        # URL 이동 확인 (write/modify 페이지에서 벗어나야 함 — 수정 성공 판정)
         for _ in range(15):
             await asyncio.sleep(1)
             current = page.url
-            if "/articles/write" not in current and "ArticleWrite" not in current:
+            if ("/articles/write" not in current and "ArticleWrite" not in current
+                and "/modify" not in current):
                 break
 
         final_url = page.url
-        if "/articles/write" in final_url:
-            log(f"⚠ 발행 후에도 write URL: {final_url}")
+        if "/articles/write" in final_url or "/modify" in final_url:
+            log(f"❌ 발행 후에도 편집 페이지에 남아있음: {final_url}")
+            log("   → 등록 버튼 클릭이 실제로 제출되지 않음 (팝업/파일형식 오류 의심)")
             return None
 
         log(f"글 수정 완료: {final_url}")
+        await _cleanup_residual_ui(page, log)
         return final_url
 
     except Exception as e:

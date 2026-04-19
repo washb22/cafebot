@@ -13,6 +13,24 @@ from flask import Flask, request, jsonify, render_template, Response
 from werkzeug.utils import secure_filename
 from config import FLASK_PORT, ACCOUNTS_FILE, DATA_DIR
 
+
+def _safe_image_name(original_name, num, prefix=""):
+    """업로드 이미지 저장명 생성 — 확장자 보존 보장.
+    한글/특수문자가 포함된 원본 이름은 secure_filename 이 확장자까지 날리기 때문에
+    확장자를 별도로 뽑아 보존한다.
+    """
+    original_name = original_name or ""
+    ext = os.path.splitext(original_name)[1].lower()
+    if ext not in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"):
+        ext = ".jpg"  # 기본값 — 네이버가 확장자 없으면 거부
+    # 원본 이름의 sanitize 결과가 비거나 확장자 잃었으면 img{num}{ext} 로 대체
+    base = os.path.splitext(original_name)[0]
+    clean = secure_filename(base)
+    if not clean:
+        clean = f"img{num}"
+    ts = str(int(time.time() * 1000))
+    return f"{ts}_{prefix}{num}_{clean}{ext}"
+
 # Ensure data + uploads dir
 os.makedirs(DATA_DIR, exist_ok=True)
 UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
@@ -27,9 +45,19 @@ else:
 app = Flask(__name__, template_folder=_template_dir)
 
 # ── State ──
+from collections import deque
 log_queue = Queue()
+log_history = deque(maxlen=50000)  # 로그 전체 보존 (다운로드용)
 task_running = False
 stop_event = threading.Event()
+
+
+def _emit_log(msg):
+    """log_fn 통합 헬퍼: queue(SSE) + history(다운로드) 동시 적재."""
+    ts = time.strftime("%H:%M:%S")
+    entry = {"type": "log", "time": ts, "message": msg}
+    log_queue.put(entry)
+    log_history.append(entry)
 
 
 # ── Account management ──
@@ -370,8 +398,7 @@ def run_comment_only():
     task_running = True
 
     def log_fn(msg):
-        ts = time.strftime("%H:%M:%S")
-        log_queue.put({"type": "log", "time": ts, "message": msg})
+        _emit_log(msg)
 
     def run_in_thread():
         global task_running
@@ -400,8 +427,7 @@ def proxy_healthcheck():
     accounts = load_accounts()
 
     def log_fn(msg):
-        ts = time.strftime("%H:%M:%S")
-        log_queue.put({"type": "log", "time": ts, "message": f"[헬스체크] {msg}"})
+        _emit_log(f"[헬스체크] {msg}")
 
     try:
         from modules.proxy_health import check_all_proxies
@@ -434,6 +460,69 @@ def adb_status():
         "connected": is_device_connected(),
         "ip": get_current_ip()
     })
+
+
+@app.route("/api/logs/download")
+def logs_download():
+    """로그 히스토리 전체를 .txt 파일로 다운로드 (브라우저 환경)."""
+    lines = [f"{e.get('time','')}\t{e.get('message','')}" for e in log_history]
+    header = [
+        f"# CafeBot 실행 로그 (서버 히스토리)",
+        f"# 생성: {time.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"# 총 {len(lines)} 줄",
+        "",
+    ]
+    body = "\n".join(header + lines)
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    return Response(
+        body.encode("utf-8"),
+        mimetype="text/plain; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="cafebot_log_{ts}.txt"',
+        },
+    )
+
+
+@app.route("/api/logs/save_to_downloads", methods=["POST"])
+def logs_save_to_downloads():
+    """WebView2 다운로드 막힘 우회: 서버가 직접 ~/Downloads 에 파일 저장."""
+    lines = [f"{e.get('time','')}\t{e.get('message','')}" for e in log_history]
+    if not lines:
+        return jsonify({"success": False, "error": "저장할 로그가 없습니다"}), 400
+    header = [
+        f"# CafeBot 실행 로그",
+        f"# 생성: {time.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"# 총 {len(lines)} 줄",
+        "",
+    ]
+    text = "\n".join(header + lines)
+    downloads_dir = os.path.join(os.path.expanduser("~"), "Downloads")
+    try:
+        os.makedirs(downloads_dir, exist_ok=True)
+    except Exception:
+        downloads_dir = os.path.expanduser("~")
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    fname = f"cafebot_log_{ts}.txt"
+    fpath = os.path.join(downloads_dir, fname)
+    try:
+        with open(fpath, "w", encoding="utf-8") as f:
+            f.write(text)
+        return jsonify({"success": True, "path": fpath, "count": len(lines)})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/logs/text")
+def logs_text():
+    """로그 히스토리를 JSON 으로 반환 (클립보드 복사용)."""
+    lines = [f"{e.get('time','')}\t{e.get('message','')}" for e in log_history]
+    return jsonify({"text": "\n".join(lines), "count": len(lines)})
+
+
+@app.route("/api/logs/clear", methods=["POST"])
+def logs_clear():
+    log_history.clear()
+    return jsonify({"success": True})
 
 
 @app.route("/api/logs/stream")
@@ -494,8 +583,7 @@ def run_task_api():
     task_running = True
 
     def log_fn(msg):
-        ts = time.strftime("%H:%M:%S")
-        log_queue.put({"type": "log", "time": ts, "message": msg})
+        _emit_log(msg)
 
     def run_in_thread():
         global task_running
@@ -568,6 +656,7 @@ def build_shuffled_exec_actions(parsed, commenter_map, main_acc, shuffle_label="
             exec_actions.append({
                 "action": "reply", "account": acc,
                 "to_index": act["to_index"], "text": act["text"],
+                "is_main": bool(act.get("is_main")),  # 2-브라우저 구조 플래그 (task_runner 가 사용)
             })
 
     # 디버그용 요약
@@ -575,11 +664,7 @@ def build_shuffled_exec_actions(parsed, commenter_map, main_acc, shuffle_label="
         f"역할{role}→{role_to_account[role].get('id','?')}"
         for role in needed_nums
     )
-    ts = time.strftime("%H:%M:%S")
-    log_queue.put({
-        "type": "log", "time": ts,
-        "message": f"[계정셔플{shuffle_label}] {mapping_summary}",
-    })
+    _emit_log(f"[계정셔플{shuffle_label}] {mapping_summary}")
 
     return exec_actions, None
 
@@ -658,9 +743,7 @@ def run_scenario():
                 num = int(key.split("_", 1)[1])
             except ValueError:
                 continue
-            safe = secure_filename(f.filename) or f"img{num}.jpg"
-            ts = str(int(time.time() * 1000))
-            fname = f"{ts}_{num}_{safe}"
+            fname = _safe_image_name(f.filename, num)
             path = os.path.join(UPLOAD_DIR, fname)
             f.save(path)
             image_map[num] = path
@@ -707,8 +790,7 @@ def run_scenario():
     task_running = True
 
     def log_fn(msg):
-        ts = time.strftime("%H:%M:%S")
-        log_queue.put({"type": "log", "time": ts, "message": msg})
+        _emit_log(msg)
 
     def run_in_thread():
         global task_running
@@ -794,9 +876,7 @@ def run_queue():
                 continue
             if not f or not f.filename:
                 continue
-            safe = secure_filename(f.filename) or f"img{num}.jpg"
-            ts = str(int(time.time() * 1000))
-            fname = f"{ts}_q{i}_{num}_{safe}"
+            fname = _safe_image_name(f.filename, num, prefix=f"q{i}_")
             path = os.path.join(UPLOAD_DIR, fname)
             f.save(path)
             image_map[num] = path
@@ -826,8 +906,7 @@ def run_queue():
     task_running = True
 
     def log_fn(msg):
-        ts = time.strftime("%H:%M:%S")
-        log_queue.put({"type": "log", "time": ts, "message": msg})
+        _emit_log(msg)
 
     def run_in_thread():
         global task_running

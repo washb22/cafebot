@@ -3,13 +3,170 @@ import asyncio
 import random
 from playwright.async_api import async_playwright
 
-from modules.browser import new_session
-from modules.naver_auth import naver_login
+from modules.browser import new_session, _normalize_proxy, USER_AGENTS, VIEWPORTS
+from modules.naver_auth import naver_login, CaptchaDetected
 from modules.naver_post import write_post, edit_post
 from modules.naver_comment import write_comment, write_reply, count_top_comments
 from modules.adb_network import interruptible_sleep
 from modules.proxy_check import verify_proxy_ip, expected_ip_from_proxy
 from config import DEFAULT_DELAYS
+
+
+class PersistentMainSession:
+    """작성자(메인) 전용 지속 세션 — 시나리오 전체 동안 살아있으면서 모든 작성자 대댓글 처리.
+    실패 시 최대 2회 재연결 시도 (Q1.B).
+    """
+
+    def __init__(self, main_acc, log_fn):
+        self.main_acc = main_acc
+        self.log = log_fn
+        self.pw = None
+        self.browser = None
+        self.ctx = None
+        self.page = None
+        self.proxy_str = (main_acc.get("proxy") or "").strip()
+        self.expected_ip = expected_ip_from_proxy(self.proxy_str)
+
+    async def open(self):
+        """브라우저 기동 → 프록시 검증 → 네이버 로그인."""
+        if self.pw is None:
+            self.pw = await async_playwright().start()
+        proxy_cfg = _normalize_proxy(self.proxy_str)
+        launch_kwargs = {
+            "headless": False,
+            "args": [
+                "--disable-blink-features=AutomationControlled",
+                "--no-first-run",
+                "--disable-infobars",
+            ],
+        }
+        if proxy_cfg:
+            launch_kwargs["proxy"] = proxy_cfg
+        self.browser = await self.pw.chromium.launch(**launch_kwargs)
+        viewport = random.choice(VIEWPORTS)
+        ua = random.choice(USER_AGENTS)
+        self.ctx = await self.browser.new_context(
+            viewport=viewport, locale="ko-KR", timezone_id="Asia/Seoul",
+            user_agent=ua, ignore_https_errors=True, java_script_enabled=True,
+        )
+        await self.ctx.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
+        )
+        self.page = await self.ctx.new_page()
+
+        # 프록시 IP 검증
+        if self.expected_ip:
+            status, actual = await verify_proxy_ip(self.page, self.expected_ip, self.log)
+            if status != "ok":
+                raise RuntimeError(f"메인 프록시 검증 실패 ({status}, actual={actual})")
+
+        # 로그인 (캡챠 시 예외 전파)
+        ok = await naver_login(self.page, self.main_acc["id"], self.main_acc["pw"], self.log)
+        if not ok:
+            raise RuntimeError("메인 로그인 실패")
+
+        self.log(f"✓ 메인 세션 열림 (지속): {self.main_acc.get('label', self.main_acc.get('id', '?'))}")
+
+    async def open_with_captcha_retry(self, retry_limit=2):
+        """캡챠 발생 시 브라우저 새로 열어 재시도. open() 외부에서 호출."""
+        for attempt in range(retry_limit + 1):
+            try:
+                await self.open()
+                return True
+            except CaptchaDetected as e:
+                self.log(f"  🔄 메인 캡챠 감지 ({attempt + 1}/{retry_limit + 1}) — 세션 정리 후 재시도")
+                await self.close()
+                if attempt < retry_limit:
+                    await asyncio.sleep(random.uniform(10, 20))
+                    continue
+                raise RuntimeError(f"메인 캡챠 재시도 한계 초과: {e}")
+            except Exception:
+                # 캡챠 외 예외는 그대로
+                raise
+        return False
+
+    async def close(self):
+        try:
+            if self.ctx:
+                await self.ctx.close()
+        except Exception:
+            pass
+        try:
+            if self.browser:
+                await self.browser.close()
+        except Exception:
+            pass
+        try:
+            if self.pw:
+                await self.pw.stop()
+        except Exception:
+            pass
+        self.pw = self.browser = self.ctx = self.page = None
+
+    async def reconnect(self):
+        """세션 죽었을 때 재연결 (Q1.B: 2회 시도). 캡챠 감지 시 재시도 로직 포함."""
+        self.log("🔄 메인 세션 재연결 시도...")
+        await self.close()
+        for attempt in range(1, 3):
+            try:
+                await self.open_with_captcha_retry(retry_limit=1)
+                self.log(f"  ✓ 재연결 성공 ({attempt}/2)")
+                return True
+            except Exception as e:
+                self.log(f"  ⚠ 재연결 {attempt}/2 실패: {str(e)[:80]}")
+                await asyncio.sleep(5)
+        self.log("❌ 메인 세션 재연결 최종 실패")
+        return False
+
+    async def goto_post_and_reply(self, post_url, actual_idx, text, delays=None):
+        """post_url 로 이동 → 2~3초 대기 → 대댓글 작성. 실패 시 재연결 후 1회 재시도."""
+        async def _attempt():
+            await self.page.goto(post_url, wait_until="domcontentloaded", timeout=30000)
+            await asyncio.sleep(random.uniform(2, 3))
+            return await write_reply(self.page, post_url, actual_idx, text, self.log)
+
+        try:
+            if self.page is None:
+                raise RuntimeError("메인 페이지 없음")
+            ok = await _attempt()
+            if ok:
+                return True
+            self.log("⚠ 작성자 대댓글 실패 → 메인 세션 재연결 후 재시도")
+        except Exception as e:
+            self.log(f"⚠ 작성자 대댓글 오류: {str(e)[:80]} → 재연결 시도")
+
+        if not await self.reconnect():
+            return False
+        try:
+            return await _attempt()
+        except Exception as e:
+            self.log(f"❌ 재연결 후에도 실패: {str(e)[:80]}")
+            return False
+
+    async def do_write_post(self, cafe_url, title, body, board_name, image_map):
+        """신규 글 작성 (로그인 스킵, 이미 로그인된 메인 세션 재사용)."""
+        if self.page is None:
+            if not await self.reconnect():
+                return None
+        return await write_post(
+            self.page, cafe_url, title, body, board_name, self.log, image_map=image_map
+        )
+
+    async def do_edit_post(self, post_url, title, body, image_map):
+        """기존 글 수정 (로그인 스킵)."""
+        if self.page is None:
+            if not await self.reconnect():
+                return None
+        return await edit_post(
+            self.page, post_url, title, body, self.log, image_map=image_map
+        )
+
+    async def count_top_comments_at(self, post_url):
+        """게시글의 기존 최상위 댓글 수 (base_offset 용)."""
+        if self.page is None:
+            if not await self.reconnect():
+                return 0
+        return await count_top_comments(self.page, post_url, self.log)
 
 
 async def random_delay(key, delays=None, stop_event=None):
@@ -59,12 +216,9 @@ async def _run_with_account(account, log_fn, stop_event, do_work):
         async with new_session(proxy=proxy) as (ctx, page):
             status, actual = await verify_proxy_ip(page, expected_ip, log_fn)
             if status == "mismatch":
-                # 실제 IP 가 다르게 찍힘 = PC IP 노출 위험 → 즉시 중단
                 log_fn(f"❌ {acc_tag} IP 불일치 (기대={expected_ip}, 실제={actual}) - 중단")
                 return {"ok": False, "fatal": True, "error": "proxy_mismatch", "result": None}
             if status == "unreachable":
-                # 프록시 서버 응답 없음 = 요청 자체 실패 = PC IP 노출 없음
-                # 이 계정만 스킵하고 다음으로
                 log_fn(f"⚠ {acc_tag} 프록시 응답 없음 (기대={expected_ip}) - 이 계정 스킵하고 계속")
                 return {"ok": False, "fatal": False, "error": "proxy_unreachable", "result": None}
 
@@ -73,9 +227,31 @@ async def _run_with_account(account, log_fn, stop_event, do_work):
 
             result = await do_work(page)
             return {"ok": True, "fatal": False, "error": None, "result": result}
+    except CaptchaDetected as e:
+        # 캡챠 감지: 브라우저가 이 지점에서 이미 닫힘 (async with 종료)
+        # 새 세션 = 새 지문으로 재시도하도록 상위에 신호
+        log_fn(f"  🔄 {acc_tag} 캡챠 감지 — 새 세션 재시도 요청")
+        return {"ok": False, "fatal": False, "error": "captcha_retry", "result": None, "captcha": True}
     except Exception as e:
         log_fn(f"❌ {acc_tag} 세션 오류: {e}")
         return {"ok": False, "fatal": False, "error": str(e), "result": None}
+
+
+async def _run_with_account_retry(account, log_fn, stop_event, do_work, captcha_retry_limit=2):
+    """_run_with_account + 캡챠 자동 재시도 래퍼.
+    캡챠 감지 시 새 세션으로 재시도 (최대 captcha_retry_limit 회).
+    """
+    for attempt in range(captcha_retry_limit + 1):
+        r = await _run_with_account(account, log_fn, stop_event, do_work)
+        if not r.get("captcha"):
+            return r
+        if attempt < captcha_retry_limit:
+            wait = random.uniform(8, 15)
+            acc_tag = f"{account.get('label', account.get('id', '?'))[:10]}"
+            log_fn(f"  🔄 {acc_tag} 캡챠 재시도 {attempt + 1}/{captcha_retry_limit} — {wait:.1f}초 대기")
+            await asyncio.sleep(wait)
+    log_fn(f"❌ 캡챠 재시도 한계 초과 — 해당 계정 스킵")
+    return r
 
 
 def _halt(stop_event, log_fn, reason):
@@ -132,9 +308,17 @@ async def run_task(task, log_fn, stop_event=None):
         total_steps = 2 + len(task.get("comments", [])) + (1 if task.get("replies") else 0)
     current_step = 0
 
+    # 메인 지속 세션: 작성자 모든 활동(글 작성/수정, base_offset, 작성자 대댓글)을 여기서 처리
+    main_session = PersistentMainSession(main, log_fn)
     try:
+        try:
+            await main_session.open_with_captcha_retry(retry_limit=2)
+        except Exception as e:
+            log_fn(f"❌ 메인 세션 초기화 실패: {e}")
+            return {"success": False, "error": f"main session init: {e}"}
+
         # ═══════════════════════════════════════
-        # STEP 1: Main account - Write/Edit post
+        # STEP 1: Main - Write/Edit post (Chrome #1 재사용)
         # ═══════════════════════════════════════
         if is_comment_only:
             post_url = task["post_url"]
@@ -142,45 +326,26 @@ async def run_task(task, log_fn, stop_event=None):
             log_fn(f"대상 글: {post_url}")
         else:
             current_step += 1
-            log_fn(f"━━━ [{current_step}/{total_steps}] 글 작성/수정 ━━━")
+            log_fn(f"━━━ [{current_step}/{total_steps}] 글 작성/수정 (메인 세션) ━━━")
+            await random_delay("after_login", delays, stop_event)
 
-            async def _do_post(page):
-                success = await naver_login(page, main["id"], main["pw"], log_fn)
-                if not success:
-                    return {"error": "메인 계정 로그인 실패"}
+            if task["mode"] == "new":
+                post_url = await main_session.do_write_post(
+                    task["cafe_url"], task["title"], task["body"],
+                    task.get("board_name"), task.get("image_map"),
+                )
+                if not post_url:
+                    log_fn("❌ 글 작성 실패 - 작업 중단")
+                    return {"success": False, "error": "글 작성 실패"}
+            else:
+                post_url = task["post_url"]
+                result = await main_session.do_edit_post(
+                    post_url, task["title"], task["body"], task.get("image_map"),
+                )
+                if not result:
+                    log_fn("❌ 글 수정 실패 - 작업 중단")
+                    return {"success": False, "error": "글 수정 실패"}
 
-                await random_delay("after_login", delays, stop_event)
-
-                if task["mode"] == "new":
-                    url = await write_post(
-                        page, task["cafe_url"], task["title"], task["body"],
-                        task.get("board_name"), log_fn,
-                        image_map=task.get("image_map"),
-                    )
-                    if not url:
-                        return {"error": "글 작성 실패"}
-                    return {"post_url": url}
-                else:
-                    url = task["post_url"]
-                    result = await edit_post(
-                        page, url, task["title"], task["body"], log_fn,
-                        image_map=task.get("image_map"),
-                    )
-                    if not result:
-                        return {"error": "글 수정 실패"}
-                    return {"post_url": url}
-
-            r = await _run_with_account(main, log_fn, stop_event, _do_post)
-            if not r["ok"]:
-                if r.get("fatal"):
-                    _halt(stop_event, log_fn, f"메인 계정 IP 문제 ({r['error']})")
-                log_fn(f"❌ 메인 세션 실패: {r['error']} - 작업 중단")
-                return {"success": False, "error": r["error"]}
-            payload = r["result"] or {}
-            if payload.get("error"):
-                log_fn(f"❌ {payload['error']}")
-                return {"success": False, "error": payload["error"]}
-            post_url = payload.get("post_url", "")
             await random_delay("after_post_submit", delays, stop_event)
             log_fn(f"글 URL: {post_url}")
 
@@ -188,11 +353,11 @@ async def run_task(task, log_fn, stop_event=None):
             log_fn("⚠ 작업 중단됨")
             return {"success": False, "error": "사용자 중단"}
 
-        # 이어하기/댓글전용 모드 대비: 기존 최상위 댓글 수 카운트 (to_index 오프셋)
+        # base_offset (Chrome #1 재사용)
         base_offset = 0
         if post_url and (task.get("replies") or task.get("scenario") or is_comment_only):
-            log_fn("기존 댓글 수 집계 중...")
-            base_offset = await _compute_base_offset(main, post_url, log_fn)
+            log_fn("기존 댓글 수 집계 중... (메인 세션)")
+            base_offset = await main_session.count_top_comments_at(post_url)
             if base_offset > 0:
                 log_fn(f"→ to_index 오프셋 {base_offset} 적용 (이어하기/댓글전용)")
 
@@ -232,7 +397,7 @@ async def run_task(task, log_fn, stop_event=None):
                 continue
 
         # ═══════════════════════════════════════
-        # STEP FINAL: Main account - Replies
+        # STEP FINAL: Main account - Replies (레거시 경로, 메인 세션 재사용)
         # ═══════════════════════════════════════
         replies = task.get("replies", [])
         if replies:
@@ -241,81 +406,133 @@ async def run_task(task, log_fn, stop_event=None):
                 return {"success": False, "error": "사용자 중단"}
 
             current_step += 1
-            log_fn(f"━━━ [{current_step}/{total_steps}] 대댓글 작성 ━━━")
+            log_fn(f"━━━ [{current_step}/{total_steps}] 대댓글 작성 (메인 세션 재사용) ━━━")
 
-            await random_delay("between_accounts", delays, stop_event)
-
-            async def _do_replies(page):
-                ok = await naver_login(page, main["id"], main["pw"], log_fn)
+            for j, reply_data in enumerate(replies):
+                if should_stop():
+                    break
+                actual_idx = reply_data["to_index"] + base_offset
+                log_fn(f"  대댓글 {j + 1}/{len(replies)} (txt idx {reply_data['to_index']} + offset {base_offset} → 페이지 #{actual_idx+1})")
+                ok = await main_session.goto_post_and_reply(
+                    post_url, actual_idx, reply_data["text"], delays
+                )
                 if not ok:
-                    return {"error": "대댓글 로그인 실패"}
-                await random_delay("after_login", delays, stop_event)
-
-                for j, reply_data in enumerate(replies):
-                    if should_stop():
-                        break
-                    actual_idx = reply_data["to_index"] + base_offset
-                    log_fn(f"  대댓글 {j + 1}/{len(replies)} 작성 중 (txt idx {reply_data['to_index']} + offset {base_offset} → 페이지 #{actual_idx+1})...")
-                    await write_reply(
-                        page, post_url, actual_idx,
-                        reply_data["text"], log_fn
-                    )
-                    await random_delay("after_comment_submit", delays, stop_event)
-                return {}
-
-            r = await _run_with_account(main, log_fn, stop_event, _do_replies)
-            if not r["ok"]:
-                if r.get("fatal"):
-                    _halt(stop_event, log_fn, f"대댓글 IP 문제 ({r['error']})")
-                    return {"success": False, "error": r["error"]}
-                log_fn(f"⚠ 대댓글 작업 실패: {r['error']}")
+                    log_fn(f"⚠ 대댓글 {j+1} 실패")
+                # 연속 대댓글 간 자연스러운 텀
+                await asyncio.sleep(random.uniform(3, 7))
 
         # ═══════════════════════════════════════
-        # SCENARIO: 시나리오 모드 (txt 파일 기반)
+        # SCENARIO: 2-브라우저 구조 (Chrome #1 = 메인 지속, Chrome #2 = 댓글러 새 세션)
+        #
+        # - 작성자(ㄴ 작성자) 대댓글: Chrome #1 에서 재사용 → 로그인 1회 → 캡챠 회피
+        # - 댓글 / 댓글러 대댓글(ㄴ 댓글N): Chrome #2 에서 매번 새 세션 + 새 프록시
+        #
+        # to_index 매핑:
+        #   target_txt_idx 가 실패한 경우 대댓글 스킵
+        #   성공한 경우 base_offset + (앞까지 성공한 comment 수) 로 실제 페이지 인덱스 계산
         # ═══════════════════════════════════════
         scenario = task.get("scenario", [])
         if scenario:
-            log_fn(f"━━━ 시나리오 실행 ({len(scenario)}개 액션) ━━━")
-            for idx, act in enumerate(scenario, 1):
-                if should_stop():
-                    log_fn("⚠ 작업 중단됨")
-                    return {"success": False, "error": "사용자 중단"}
+            log_fn(f"━━━ 시나리오 실행 (2-브라우저, {len(scenario)}개 액션) ━━━")
 
-                acc = act.get("account")
-                if not acc:
-                    log_fn(f"⚠ action #{idx}: 계정 정보 없음 - 건너뜀")
-                    continue
+            comment_txt_idx_counter = 0
+            comment_success = {}
 
-                log_fn(f"━━━ [{idx}/{len(scenario)}] {act.get('action')} ({acc.get('label', acc.get('id', ''))[:10]}) ━━━")
-
-                await random_delay("between_accounts", delays, stop_event)
-
-                async def _do_action(page, _acc=acc, _act=act):
-                    ok = await naver_login(page, _acc["id"], _acc["pw"], log_fn)
-                    if not ok:
-                        return {"error": "로그인 실패"}
-                    await random_delay("after_login", delays, stop_event)
+            try:
+                for idx, act in enumerate(scenario, 1):
                     if should_stop():
-                        return {"error": "stopped"}
+                        log_fn("⚠ 작업 중단됨")
+                        break
 
-                    if _act["action"] == "comment":
-                        await write_comment(page, post_url, _act["text"], log_fn)
-                    elif _act["action"] == "reply":
-                        actual_idx = _act["to_index"] + base_offset
-                        log_fn(f"  (txt idx {_act['to_index']} + offset {base_offset} → 페이지 #{actual_idx+1})")
-                        await write_reply(page, post_url, actual_idx, _act["text"], log_fn)
+                    acc = act.get("account")
+                    if not acc:
+                        log_fn(f"⚠ action #{idx}: 계정 정보 없음 - 건너뜀")
+                        if act.get("action") == "comment":
+                            comment_success[comment_txt_idx_counter] = False
+                            comment_txt_idx_counter += 1
+                        continue
+
+                    log_fn(f"━━━ [{idx}/{len(scenario)}] {act.get('action')} ({acc.get('label', acc.get('id', ''))[:10]}) ━━━")
+
+                    # reply 인 경우 target 검증 + 실제 인덱스 계산
+                    if act["action"] == "reply":
+                        target_txt_idx = act["to_index"]
+                        if not comment_success.get(target_txt_idx, False):
+                            log_fn(f"⚠ 대상 댓글(txt idx {target_txt_idx}) 실패 → 대댓글 스킵")
+                            continue
+                        succeeded_before = sum(
+                            1 for k, v in comment_success.items()
+                            if k < target_txt_idx and v
+                        )
+                        actual_idx = base_offset + succeeded_before
                     else:
-                        return {"error": f"알 수 없는 action: {_act['action']}"}
+                        actual_idx = None
 
-                    await random_delay("after_comment_submit", delays, stop_event)
-                    return {}
+                    is_main_reply = act["action"] == "reply" and act.get("is_main")
 
-                r = await _run_with_account(acc, log_fn, stop_event, _do_action)
-                if not r["ok"]:
-                    if r.get("fatal"):
-                        _halt(stop_event, log_fn, f"action #{idx} IP 문제 ({r['error']})")
-                        return {"success": False, "error": r["error"]}
-                    log_fn(f"⚠ action #{idx} 건너뜀: {r['error']}")
+                    # ── Chrome #1: 작성자 대댓글 (지속 세션 재사용) ──
+                    if is_main_reply:
+                        log_fn(f"  [메인 세션 재사용] txt idx {act['to_index']} → 페이지 #{actual_idx+1}")
+                        ok = await main_session.goto_post_and_reply(
+                            post_url, actual_idx, act["text"], delays
+                        )
+                        if not ok:
+                            log_fn(f"❌ 작성자 대댓글 최종 실패 - 다음 액션 계속")
+                        # 메인 연속 대댓글 사이 짧은 대기 (너무 빠르지 않게)
+                        await asyncio.sleep(random.uniform(3, 7))
+                        continue
+
+                    # ── Chrome #2: 댓글 or 댓글러 대댓글 (새 세션) ──
+                    if act["action"] == "comment":
+                        this_comment_txt_idx = comment_txt_idx_counter
+                        comment_txt_idx_counter += 1
+                    else:
+                        this_comment_txt_idx = None
+
+                    await random_delay("between_accounts", delays, stop_event)
+
+                    async def _do_action(page, _acc=acc, _act=act, _aidx=actual_idx):
+                        ok = await naver_login(page, _acc["id"], _acc["pw"], log_fn)
+                        if not ok:
+                            return {"error": "로그인 실패"}
+                        await random_delay("after_login", delays, stop_event)
+                        if should_stop():
+                            return {"error": "stopped"}
+
+                        if _act["action"] == "comment":
+                            result = await write_comment(page, post_url, _act["text"], log_fn)
+                            if not result:
+                                return {"error": "댓글 작성 실패", "comment_ok": False}
+                        elif _act["action"] == "reply":
+                            log_fn(f"  (txt idx {_act['to_index']} → 페이지 #{_aidx+1})")
+                            result = await write_reply(page, post_url, _aidx, _act["text"], log_fn)
+                            if not result:
+                                return {"error": "대댓글 작성 실패"}
+
+                        await random_delay("after_comment_submit", delays, stop_event)
+                        return {"comment_ok": True}
+
+                    r = await _run_with_account_retry(acc, log_fn, stop_event, _do_action)
+
+                    if act["action"] == "comment":
+                        succ = bool(r["ok"]) and bool((r.get("result") or {}).get("comment_ok", False))
+                        comment_success[this_comment_txt_idx] = succ
+                        # Q3: 댓글 성공 시 2~3초 대기 (다음이 작성자 답글일 수 있어 자연스러운 텀)
+                        if succ:
+                            await asyncio.sleep(random.uniform(2, 3))
+
+                    if not r["ok"]:
+                        if r.get("fatal"):
+                            _halt(stop_event, log_fn, f"action #{idx} IP 문제 ({r['error']})")
+                            break
+                        log_fn(f"⚠ action #{idx} 건너뜀: {r['error']}")
+
+                # 요약
+                succ_cnt = sum(1 for v in comment_success.values() if v)
+                fail_cnt = sum(1 for v in comment_success.values() if not v)
+                log_fn(f"시나리오 댓글 결과: 성공 {succ_cnt} / 실패 {fail_cnt} (총 {len(comment_success)})")
+            except Exception as e:
+                log_fn(f"⚠ 시나리오 실행 중 예외: {e}")
 
         log_fn("━━━━━━━━━━━━━━━━━━━━━━━━")
         log_fn("✅ 작업 완료!")
@@ -325,6 +542,13 @@ async def run_task(task, log_fn, stop_event=None):
     except Exception as e:
         log_fn(f"❌ 작업 오류: {str(e)}")
         return {"success": False, "error": str(e)}
+    finally:
+        # Chrome #1 메인 세션 정리 (작업 끝 or 예외 발생 시 공통)
+        try:
+            await main_session.close()
+            log_fn("메인 세션 종료")
+        except Exception:
+            pass
 
 
 async def run_batch(tasks, log_fn, stop_event=None):

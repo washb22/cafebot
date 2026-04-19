@@ -79,14 +79,19 @@ def parse_scenario_text(text):
     image_marker_re = re.compile(r'\[이미지(\d+)\]')
     image_nums = sorted({int(m) for m in image_marker_re.findall(body)})
 
-    # 댓글/대댓글 파싱
+    # 댓글/대댓글 파싱 (여러 줄 본문 지원: 마커 없는 줄은 직전 action 에 이어붙임)
     actions = []
     commenter_nums = set()
     comments_only = []  # top-level comments in order (for to_index 계산)
+    last_action = None  # 직전에 만들어진 action (continuation line append 대상)
 
     for raw_line in comments_part.split('\n'):
         line = raw_line.strip()
+
         if not line:
+            # 빈 줄: 현재 action 안의 단락 구분자로 \n 추가 (첫 줄/마커 사이는 무시)
+            if last_action is not None:
+                last_action['text'] = last_action['text'].rstrip() + '\n'
             continue
 
         m = COMMENT_RE.match(line)
@@ -95,11 +100,12 @@ def parse_scenario_text(text):
             content = m.group(2).strip()
             commenter_nums.add(num)
             comments_only.append(num)
-            actions.append({
+            last_action = {
                 "action": "comment",
                 "commenter_num": num,
                 "text": content,
-            })
+            }
+            actions.append(last_action)
             continue
 
         m = AUTHOR_REPLY_RE.match(line)
@@ -107,12 +113,13 @@ def parse_scenario_text(text):
             content = m.group(1).strip()
             if not comments_only:
                 raise ValueError(f"ㄴ 작성자 답글이 어떤 댓글에 대한 것인지 불명: {line[:40]}")
-            actions.append({
+            last_action = {
                 "action": "reply",
                 "is_main": True,
                 "to_index": len(comments_only) - 1,
                 "text": content,
-            })
+            }
+            actions.append(last_action)
             continue
 
         m = COMMENTER_REPLY_RE.match(line)
@@ -122,16 +129,24 @@ def parse_scenario_text(text):
             commenter_nums.add(num)
             if not comments_only:
                 raise ValueError(f"ㄴ 댓글{num} 답글이 어떤 댓글에 대한 것인지 불명: {line[:40]}")
-            actions.append({
+            last_action = {
                 "action": "reply",
                 "is_main": False,
                 "commenter_num": num,
                 "to_index": len(comments_only) - 1,
                 "text": content,
-            })
+            }
+            actions.append(last_action)
             continue
 
-        # 알 수 없는 줄은 경고 없이 스킵 (파일 여백 등)
+        # 마커가 아닌 일반 줄: 직전 action 의 본문에 이어붙임 (여러 줄 댓글 지원)
+        if last_action is not None:
+            last_action['text'] = last_action['text'].rstrip() + '\n' + line
+        # else: 최초 마커 이전의 여백/헤더 줄은 무시
+
+    # 각 action 의 text 끝 개행 정리
+    for a in actions:
+        a['text'] = a['text'].strip()
 
     return {
         "title": title,

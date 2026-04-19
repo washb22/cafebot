@@ -396,7 +396,8 @@
           <option value="all">전체</option>
           <option value="error">에러만</option>
         </select>
-        <button class="btn btn-outline btn-sm" onclick="downloadLog()" title="현재까지의 전체 로그를 텍스트 파일로 저장">⬇ 로그 저장</button>
+        <button class="btn btn-outline btn-sm" onclick="downloadLog()" title="서버 저장된 전체 로그를 txt 파일로 다운로드">⬇ 로그 저장</button>
+        <button class="btn btn-outline btn-sm" onclick="copyLogToClipboard()" title="서버 저장된 전체 로그를 클립보드로 복사">📋 로그 복사</button>
         <button class="btn btn-outline btn-sm" onclick="clearLog()">지우기</button>
       </div>
     </div>
@@ -920,26 +921,51 @@ function classifyLog(msg) {
   return '';
 }
 
-function downloadLog() {
-  const body = document.getElementById('logBody');
-  const lines = [];
-  body.querySelectorAll('.log-line').forEach(el => {
-    const t = el.querySelector('.log-time')?.textContent || '';
-    const m = el.querySelector('.log-msg')?.textContent || '';
-    lines.push(`${t}\t${m}`);
-  });
-  if (lines.length === 0) { alert('저장할 로그가 없습니다'); return; }
-  const ts = new Date().toISOString().replace(/[-:T.Z]/g,'').slice(0,14);
-  const text = `# CafeBot 실행 로그\n# 생성: ${new Date().toLocaleString('ko-KR')}\n# 총 ${lines.length} 줄\n\n` + lines.join('\n');
-  const blob = new Blob([text], {type: 'text/plain;charset=utf-8'});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `cafebot_log_${ts}.txt`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+async function downloadLog() {
+  // 서버가 직접 ~/Downloads 에 파일 저장 (WebView2 다운로드 막힘 우회)
+  try {
+    const res = await fetch('/api/logs/save_to_downloads', { method: 'POST' });
+    const data = await res.json();
+    if (data.success) {
+      alert(`로그 ${data.count}줄 저장 완료\n경로: ${data.path}`);
+    } else {
+      alert('저장 실패: ' + (data.error || '알 수 없는 오류'));
+    }
+  } catch(e) {
+    alert('저장 오류: ' + e.message);
+  }
+}
+
+async function copyLogToClipboard() {
+  try {
+    const res = await fetch('/api/logs/text');
+    const data = await res.json();
+    if (!data.text || data.count === 0) { alert('복사할 로그가 없습니다'); return; }
+    // 1차: navigator.clipboard (HTTPS/permissions 필요)
+    try {
+      await navigator.clipboard.writeText(data.text);
+      alert(`로그 ${data.count}줄 복사 완료. 원하는 곳에 붙여넣기 하세요.`);
+      return;
+    } catch(e) {
+      // 2차 폴백: 숨은 textarea + execCommand('copy')
+      const ta = document.createElement('textarea');
+      ta.value = data.text;
+      ta.style.position = 'fixed';
+      ta.style.top = '-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      try {
+        document.execCommand('copy');
+        alert(`로그 ${data.count}줄 복사 완료 (폴백).`);
+      } catch(e2) {
+        alert('클립보드 복사 실패. "로그 저장" 버튼으로 파일 받으세요.');
+      } finally {
+        document.body.removeChild(ta);
+      }
+    }
+  } catch(e) {
+    alert('로그 조회 실패: ' + e.message);
+  }
 }
 
 function addLog(time, msg) {
@@ -1073,6 +1099,8 @@ function setLogFilter(level) {
 
 function clearLog() {
   document.getElementById('logBody').innerHTML = '';
+  // 서버 히스토리도 함께 비움 (다음 다운로드 때 섞이지 않도록)
+  fetch('/api/logs/clear', { method: 'POST' }).catch(()=>{});
   currentGroupEl = null;
   progress = { batchCurrent:0, batchTotal:0, subCurrent:0, subTotal:0, action:'대기 중', ok:0, fail:0 };
   updateProgressUI();

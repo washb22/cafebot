@@ -45,14 +45,14 @@ async def _find_register_btn(page):
 async def _scroll_to_bottom(page):
     """페이지와 모든 iframe을 끝까지 스크롤 (lazy-load 트리거)"""
     try:
-        for _ in range(3):
+        for _ in range(2):
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             for f in page.frames:
                 try:
                     await f.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 except Exception:
                     pass
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(1)
     except Exception:
         pass
 
@@ -113,7 +113,7 @@ async def write_comment(page, post_url, comment_text, log_fn=None):
             await page.goto(post_url, wait_until="domcontentloaded", timeout=30000)
         except Exception as e:
             log(f"이동 타임아웃(무시): {e}")
-        await human_delay(3, 5)
+        await human_delay(1.5, 3)
 
         # lazy-load 트리거
         await _scroll_to_bottom(page)
@@ -136,12 +136,19 @@ async def write_comment(page, post_url, comment_text, log_fn=None):
         await tb.click()
         await human_delay(0.5, 1)
 
-        # 댓글 입력
+        # 댓글 입력 (여러 줄은 Shift+Enter 로 줄바꿈)
         log("댓글 입력 중...")
-        for char in comment_text:
-            await page.keyboard.type(char, delay=random.randint(15, 50))
-            if random.random() < 0.05:
-                await human_delay(0.1, 0.3)
+        lines = comment_text.split('\n')
+        for li, line in enumerate(lines):
+            for char in line:
+                await page.keyboard.type(char, delay=random.randint(15, 50))
+                if random.random() < 0.05:
+                    await human_delay(0.1, 0.3)
+            if li < len(lines) - 1:
+                await page.keyboard.down('Shift')
+                await page.keyboard.press('Enter')
+                await page.keyboard.up('Shift')
+                await human_delay(0.1, 0.25)
         await human_delay(0.3, 0.8)
 
         # 등록
@@ -151,7 +158,7 @@ async def write_comment(page, post_url, comment_text, log_fn=None):
             return False
 
         await pub.click()
-        await human_delay(3, 5)
+        await human_delay(1.5, 3)
         log("댓글 작성 완료")
         return True
 
@@ -174,19 +181,16 @@ async def write_reply(page, post_url, comment_index, reply_text, log_fn=None):
                 await page.goto(post_url, wait_until="domcontentloaded", timeout=30000)
             except Exception as e:
                 log(f"이동 타임아웃(무시): {e}")
-            await human_delay(3, 5)
+            await human_delay(1.5, 3)
             await _scroll_to_bottom(page)
 
         # 댓글 목록 탐색 (li.CommentItem 중 최상위 댓글만 — 답글/reply 제외)
-        # 버그: li.CommentItem 이 답글(class="CommentItem CommentItem--reply" 등)도 포함
-        # → JS evaluate 로 class 에 reply/answer 미포함 요소만 수집
         log(f"댓글 목록 탐색 (최상위만)...")
-        comments = []
-        for attempt in range(8):
-            comments = []
+
+        async def _collect_top_comments():
+            res = []
             for t in [page] + list(page.frames):
                 try:
-                    # JS로 최상위 댓글만 index 반환 (답글 제외)
                     top_indices = await t.evaluate("""
                         () => {
                             const items = Array.from(document.querySelectorAll('li.CommentItem'));
@@ -205,15 +209,37 @@ async def write_reply(page, post_url, comment_index, reply_text, log_fn=None):
                     els = await t.query_selector_all('li.CommentItem')
                     for idx in top_indices:
                         if idx < len(els):
-                            comments.append((els[idx], t))
+                            res.append((els[idx], t))
                 except Exception:
                     pass
+            return res
+
+        comments = []
+        # 1차: 최대 8회 × 2초 = 16초 대기
+        for attempt in range(8):
+            comments = await _collect_top_comments()
             if comments:
                 break
             await asyncio.sleep(2)
 
+        # 1차 실패 시 페이지 reload + 추가 재시도 (캡챠 해결 후 로딩 미완료 케이스 등)
         if not comments:
-            log(f"⚠ 댓글이 없음")
+            log(f"⚠ 댓글 목록 1차 실패 — 페이지 reload 후 재시도")
+            try:
+                await page.goto(post_url, wait_until="domcontentloaded", timeout=30000)
+            except Exception as e:
+                log(f"  reload 타임아웃(무시): {e}")
+            await human_delay(2, 4)
+            await _scroll_to_bottom(page)
+            for attempt in range(6):
+                comments = await _collect_top_comments()
+                if comments:
+                    log(f"  ✓ reload 후 {attempt + 1}회만에 탐지됨")
+                    break
+                await asyncio.sleep(2)
+
+        if not comments:
+            log(f"⚠ 댓글이 없음 (최종 포기)")
             return False
 
         if comment_index >= len(comments):
@@ -252,10 +278,18 @@ async def write_reply(page, post_url, comment_index, reply_text, log_fn=None):
         await tb.click()
         await human_delay(0.3, 0.7)
 
-        for char in reply_text:
-            await page.keyboard.type(char, delay=random.randint(15, 50))
-            if random.random() < 0.05:
-                await human_delay(0.1, 0.3)
+        # 대댓글 입력 (여러 줄은 Shift+Enter 로 줄바꿈)
+        lines = reply_text.split('\n')
+        for li, line in enumerate(lines):
+            for char in line:
+                await page.keyboard.type(char, delay=random.randint(15, 50))
+                if random.random() < 0.05:
+                    await human_delay(0.1, 0.3)
+            if li < len(lines) - 1:
+                await page.keyboard.down('Shift')
+                await page.keyboard.press('Enter')
+                await page.keyboard.up('Shift')
+                await human_delay(0.1, 0.25)
         await human_delay(0.3, 0.8)
 
         # 등록
@@ -265,7 +299,7 @@ async def write_reply(page, post_url, comment_index, reply_text, log_fn=None):
             return False
 
         await pub.click()
-        await human_delay(3, 5)
+        await human_delay(1.5, 3)
         log(f"대댓글 #{comment_index + 1} 작성 완료")
         return True
 
