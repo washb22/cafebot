@@ -52,6 +52,8 @@ xcopy "%LOCALAPPDATA%\ms-playwright\chromium-1208" "dist\CafeBot\browsers\chromi
 REM Step 6: Inno Setup 인스톨러 생성
 echo [6/6] Inno Setup 인스톨러 빌드...
 set ISCC="C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+if not exist %ISCC% set ISCC="C:\Program Files\Inno Setup 6\ISCC.exe"
+if not exist %ISCC% set ISCC="%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe"
 if not exist %ISCC% (
     echo 경고: Inno Setup 미설치 - 인스톨러 생략
     goto :END
@@ -68,7 +70,7 @@ echo.
 echo ========================================
 echo   빌드 완료!
 echo   - 실행 폴더: dist\CafeBot
-echo   - 인스톨러 : installer_output\CafeBot_Setup_v1.1.exe
+echo   - 인스톨러 : installer_output\CafeBot_Setup_v1.2.exe
 echo ========================================
 echo.
 pause

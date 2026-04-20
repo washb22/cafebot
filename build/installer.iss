@@ -1,12 +1,15 @@
 ; CafeBot Inno Setup Installer Script
 [Setup]
+AppId={{A3F5E2D1-CB4A-4B67-9D8F-CAFEBOT000001}
 AppName=CafeBot
-AppVersion=1.1
+AppVersion=1.2
 AppPublisher=CafeBot
 DefaultDirName={autopf}\CafeBot
 DefaultGroupName=CafeBot
 OutputDir=..\installer_output
-OutputBaseFilename=CafeBot_Setup_v1.1
+OutputBaseFilename=CafeBot_Setup_v1.2
+CloseApplications=force
+RestartApplications=no
 Compression=lzma2/ultra64
 SolidCompression=yes
 SetupIconFile=icon.ico
