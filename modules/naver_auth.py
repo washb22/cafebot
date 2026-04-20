@@ -110,6 +110,8 @@ async def naver_login(page, account_id, account_pw, log_fn=None):
         log(f"로그인 성공: {account_id[:3]}***")
         return True
 
+    except CaptchaDetected:
+        raise
     except Exception as e:
         log(f"로그인 오류: {str(e)}")
         return False

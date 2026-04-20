@@ -388,7 +388,7 @@ async def run_task(task, log_fn, stop_event=None):
                 await random_delay("after_comment_submit", delays, stop_event)
                 return {}
 
-            r = await _run_with_account(acc, log_fn, stop_event, _do_comment)
+            r = await _run_with_account_retry(acc, log_fn, stop_event, _do_comment)
             if not r["ok"]:
                 if r.get("fatal"):
                     _halt(stop_event, log_fn, f"댓글 {i+1} IP 문제 ({r['error']})")
