@@ -11,7 +11,11 @@ else:
 FLASK_PORT = 5002
 DATA_DIR = os.path.join(BASE_DIR, "data")
 ACCOUNTS_FILE = os.path.join(DATA_DIR, "accounts.json")
+SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
 LOG_DIR = os.path.join(BASE_DIR, "logs")
+
+# IP 변경 방식: "proxy" (HTTP 프록시) 또는 "adb" (안드로이드 테더링 비행기모드)
+DEFAULT_IP_MODE = "proxy"
 ADB_PATH = os.path.join(BASE_DIR, "adb", "adb.exe")
 if not os.path.exists(ADB_PATH):
     ADB_PATH = "adb"

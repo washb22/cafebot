@@ -11,7 +11,7 @@ from queue import Queue
 
 from flask import Flask, request, jsonify, render_template, Response
 from werkzeug.utils import secure_filename
-from config import FLASK_PORT, ACCOUNTS_FILE, DATA_DIR
+from config import FLASK_PORT, ACCOUNTS_FILE, DATA_DIR, SETTINGS_FILE, DEFAULT_IP_MODE
 
 
 def _safe_image_name(original_name, num, prefix=""):
@@ -93,6 +93,32 @@ def load_accounts():
     return data
 
 
+def load_settings():
+    """설정 파일(ip_mode 등) 로드. 파일이 없거나 깨져있으면 기본값."""
+    if os.path.exists(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            data = {}
+    else:
+        data = {}
+    mode = (data.get("ip_mode") or DEFAULT_IP_MODE).lower()
+    if mode not in ("proxy", "adb"):
+        mode = DEFAULT_IP_MODE
+    data["ip_mode"] = mode
+    return data
+
+
+def save_settings(data):
+    with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def get_ip_mode():
+    return load_settings().get("ip_mode", DEFAULT_IP_MODE)
+
+
 def save_accounts(data):
     # main 필드가 올라오면 mains[0] 로 변환
     if "mains" not in data:
@@ -128,6 +154,25 @@ def _resolve_main(accounts, main_id=None):
 @app.route("/")
 def index():
     return render_template("index.html")
+
+
+@app.route("/api/settings", methods=["GET"])
+def get_settings_api():
+    return jsonify(load_settings())
+
+
+@app.route("/api/settings", methods=["POST"])
+def update_settings_api():
+    data = request.json or {}
+    current = load_settings()
+    # 허용 필드만 갱신
+    if "ip_mode" in data:
+        mode = str(data.get("ip_mode") or "").lower()
+        if mode not in ("proxy", "adb"):
+            return jsonify({"error": "ip_mode 는 proxy 또는 adb 여야 합니다"}), 400
+        current["ip_mode"] = mode
+    save_settings(current)
+    return jsonify({"success": True, "settings": current})
 
 
 @app.route("/api/accounts", methods=["GET"])
@@ -376,7 +421,8 @@ def run_comment_only():
         if m:
             commenter_map[int(m.group())] = c
 
-    exec_actions, err = build_shuffled_exec_actions(parsed, commenter_map, main_acc)
+    ip_mode = get_ip_mode()
+    exec_actions, err = build_shuffled_exec_actions(parsed, commenter_map, main_acc, ip_mode=ip_mode)
     if err:
         return jsonify({"error": err}), 400
 
@@ -392,6 +438,7 @@ def run_comment_only():
         "replies": [],
         "scenario": exec_actions,
         "image_map": {},
+        "ip_mode": ip_mode,
     }
 
     stop_event.clear()
@@ -576,6 +623,7 @@ def run_task_api():
         "main_account": main_acc,
         "comments": comments,
         "replies": replies,
+        "ip_mode": get_ip_mode(),
     }
 
     # Run in background thread
@@ -604,32 +652,47 @@ def run_task_api():
     return jsonify({"success": True, "message": "작업 시작됨"})
 
 
-def build_shuffled_exec_actions(parsed, commenter_map, main_acc, shuffle_label=""):
+def build_shuffled_exec_actions(parsed, commenter_map, main_acc, shuffle_label="", ip_mode=None):
     """parsed 시나리오 → 실행용 actions 생성 + 계정 셔플.
 
     텍스트 파일의 댓글 순서는 그대로 유지하되, 역할번호(댓글1/댓글2/...)를
     실제 commenter 계정에 랜덤 배정한다. 같은 역할번호는 같은 계정으로 매핑 유지
     → 대댓글 대화 일관성 보존. to_index도 원본 그대로 유지.
 
+    ip_mode: "proxy" 면 프록시 설정된 계정만 셔플 풀에 포함.
+             "adb" 면 모든 등록 계정을 풀에 포함(IP 는 비행기모드 토글로 바꿈).
+             None 이면 settings 에서 읽음.
+
     Returns: (exec_actions, error_message_or_None)
     """
-    needed_nums = list(parsed["commenter_nums"])
-    # 프록시 설정된 commenter 만 셔플 풀에 포함 (IP 미변경 방지)
-    available = [k for k, v in commenter_map.items() if (v.get("proxy") or "").strip()]
-    total = len(commenter_map)
-    if len(available) < len(needed_nums):
-        return None, (
-            f"프록시 설정된 commenter 부족: 필요 {len(needed_nums)}개 / "
-            f"프록시 설정됨 {len(available)}개 (전체 {total}개). "
-            "계정 관리 → 프록시 매핑에서 host:port 입력 후 저장하세요."
-        )
+    if ip_mode is None:
+        ip_mode = get_ip_mode()
 
-    # 프록시 설정된 메인 계정인지 검증
-    if not (main_acc.get("proxy") or "").strip():
-        return None, (
-            f"글 작성자({main_acc.get('id','?')}) 에 프록시가 설정되지 않았습니다. "
-            "계정 관리 → 프록시 매핑에서 설정하세요."
-        )
+    needed_nums = list(parsed["commenter_nums"])
+    total = len(commenter_map)
+
+    if ip_mode == "proxy":
+        # 프록시 설정된 commenter 만 셔플 풀에 포함 (IP 미변경 방지)
+        available = [k for k, v in commenter_map.items() if (v.get("proxy") or "").strip()]
+        if len(available) < len(needed_nums):
+            return None, (
+                f"프록시 설정된 commenter 부족: 필요 {len(needed_nums)}개 / "
+                f"프록시 설정됨 {len(available)}개 (전체 {total}개). "
+                "계정 관리 → 프록시 매핑에서 host:port 입력 후 저장하거나, "
+                "우측 상단에서 ADB 모드로 전환하세요."
+            )
+        if not (main_acc.get("proxy") or "").strip():
+            return None, (
+                f"글 작성자({main_acc.get('id','?')}) 에 프록시가 설정되지 않았습니다. "
+                "계정 관리 → 프록시 매핑에서 설정하거나, ADB 모드로 전환하세요."
+            )
+    else:
+        # ADB 모드: 모든 등록 계정이 풀 (프록시 필드 무시)
+        available = list(commenter_map.keys())
+        if len(available) < len(needed_nums):
+            return None, (
+                f"commenter 계정 부족: 필요 {len(needed_nums)}개 / 등록 {total}개."
+            )
 
     # 역할번호 → 실제 계정 랜덤 매핑 (프록시 있는 계정만)
     picked = random.sample(available, len(needed_nums))
@@ -768,8 +831,9 @@ def run_scenario():
         if m:
             commenter_map[int(m.group())] = c
 
+    ip_mode = get_ip_mode()
     # 시나리오 actions → 실행용 actions (계정 셔플 + 그룹 순서 셔플)
-    exec_actions, err = build_shuffled_exec_actions(parsed, commenter_map, main_acc)
+    exec_actions, err = build_shuffled_exec_actions(parsed, commenter_map, main_acc, ip_mode=ip_mode)
     if err:
         return jsonify({"error": err}), 400
 
@@ -784,6 +848,7 @@ def run_scenario():
         "replies": [],
         "scenario": exec_actions,
         "image_map": image_map,
+        "ip_mode": ip_mode,
     }
 
     stop_event.clear()
@@ -839,6 +904,7 @@ def run_queue():
         if m:
             commenter_map[int(m.group())] = c
 
+    batch_ip_mode = get_ip_mode()
     tasks = []
     for i in range(count):
         prefix = f"s{i}_"
@@ -883,7 +949,7 @@ def run_queue():
 
         # 시나리오 actions → 실행용 (계정 셔플 + 그룹 순서 셔플, 글마다 독립 재셔플)
         exec_actions, err = build_shuffled_exec_actions(
-            parsed, commenter_map, main_acc, shuffle_label=f" 글{i+1}"
+            parsed, commenter_map, main_acc, shuffle_label=f" 글{i+1}", ip_mode=batch_ip_mode
         )
         if err:
             return jsonify({"error": f"작업 #{i+1}: {err}"}), 400
@@ -900,6 +966,7 @@ def run_queue():
             "replies": [],
             "scenario": exec_actions,
             "image_map": image_map,
+            "ip_mode": batch_ip_mode,
         })
 
     stop_event.clear()

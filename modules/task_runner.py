@@ -7,28 +7,37 @@ from modules.browser import new_session, _normalize_proxy, USER_AGENTS, VIEWPORT
 from modules.naver_auth import naver_login, CaptchaDetected
 from modules.naver_post import write_post, edit_post
 from modules.naver_comment import write_comment, write_reply, count_top_comments
-from modules.adb_network import interruptible_sleep
+from modules.adb_network import interruptible_sleep, toggle_airplane_mode, is_device_connected, get_current_ip
 from modules.proxy_check import verify_proxy_ip, expected_ip_from_proxy
-from config import DEFAULT_DELAYS
+from config import DEFAULT_DELAYS, DEFAULT_IP_MODE
 
 
 class PersistentMainSession:
     """작성자(메인) 전용 지속 세션 — 시나리오 전체 동안 살아있으면서 모든 작성자 대댓글 처리.
     실패 시 최대 2회 재연결 시도 (Q1.B).
+
+    ip_mode: "proxy" = 계정의 proxy 필드 사용 + 실 IP 검증.
+             "adb"   = 프록시 없이 PC 공인 IP(폰 테더링) 로 직접 접속.
     """
 
-    def __init__(self, main_acc, log_fn):
+    def __init__(self, main_acc, log_fn, ip_mode=DEFAULT_IP_MODE):
         self.main_acc = main_acc
         self.log = log_fn
+        self.ip_mode = ip_mode
         self.pw = None
         self.browser = None
         self.ctx = None
         self.page = None
-        self.proxy_str = (main_acc.get("proxy") or "").strip()
-        self.expected_ip = expected_ip_from_proxy(self.proxy_str)
+        # ADB 모드에서는 프록시 필드 무시
+        if ip_mode == "adb":
+            self.proxy_str = ""
+            self.expected_ip = None
+        else:
+            self.proxy_str = (main_acc.get("proxy") or "").strip()
+            self.expected_ip = expected_ip_from_proxy(self.proxy_str)
 
     async def open(self):
-        """브라우저 기동 → 프록시 검증 → 네이버 로그인."""
+        """브라우저 기동 → 프록시 검증(프록시 모드만) → 네이버 로그인."""
         if self.pw is None:
             self.pw = await async_playwright().start()
         proxy_cfg = _normalize_proxy(self.proxy_str)
@@ -54,8 +63,8 @@ class PersistentMainSession:
         )
         self.page = await self.ctx.new_page()
 
-        # 프록시 IP 검증
-        if self.expected_ip:
+        # 프록시 IP 검증 (proxy 모드 전용)
+        if self.ip_mode == "proxy" and self.expected_ip:
             status, actual = await verify_proxy_ip(self.page, self.expected_ip, self.log)
             if status != "ok":
                 raise RuntimeError(f"메인 프록시 검증 실패 ({status}, actual={actual})")
@@ -65,7 +74,8 @@ class PersistentMainSession:
         if not ok:
             raise RuntimeError("메인 로그인 실패")
 
-        self.log(f"✓ 메인 세션 열림 (지속): {self.main_acc.get('label', self.main_acc.get('id', '?'))}")
+        mode_tag = "ADB" if self.ip_mode == "adb" else "프록시"
+        self.log(f"✓ 메인 세션 열림 (지속/{mode_tag}): {self.main_acc.get('label', self.main_acc.get('id', '?'))}")
 
     async def open_with_captcha_retry(self, retry_limit=2):
         """캡챠 발생 시 브라우저 새로 열어 재시도. open() 외부에서 호출."""
@@ -190,19 +200,84 @@ async def _open_session_with_proxy(account, log_fn, verify=True):
     return proxy
 
 
-async def _run_with_account(account, log_fn, stop_event, do_work):
-    """계정의 프록시로 세션을 열고 do_work(page) 실행. 프록시 검증 포함.
+async def _rotate_adb_ip(log_fn, stop_event, extra_retries=1):
+    """ADB 모드 전용: 폰 비행기모드 토글로 PC 공인 IP 변경.
+
+    실패 시 extra_retries 회 추가 재시도 (토글 간 대기 포함).
+    최종 실패 시 fatal=True — 같은 IP 로 다음 계정 진행하면 연관성 노출 위험.
+
+    Returns: {"ok": bool, "fatal": bool, "error": str or None, "new_ip": str}
+    """
+    if not is_device_connected():
+        log_fn("❌ ADB 디바이스 미연결 - IP 변경 불가 (USB 테더링 + USB 디버깅 허용 확인)")
+        return {"ok": False, "fatal": True, "error": "adb_not_connected", "new_ip": None}
+
+    before_ip = get_current_ip()
+
+    for attempt in range(1, extra_retries + 2):  # 1 = 기본 + extra_retries 회
+        if stop_event and stop_event.is_set():
+            return {"ok": False, "fatal": False, "error": "stopped", "new_ip": None}
+        try:
+            new_ip = await toggle_airplane_mode(log_fn, stop_event)
+        except Exception as e:
+            log_fn(f"❌ ADB 토글 예외: {e}")
+            new_ip = None
+
+        if new_ip and new_ip != before_ip:
+            return {"ok": True, "fatal": False, "error": None, "new_ip": new_ip}
+
+        if attempt <= extra_retries:
+            wait = 20
+            log_fn(f"⚠ IP 변경 실패 ({attempt}/{extra_retries + 1}) — {wait}초 후 재시도")
+            if await interruptible_sleep(wait, stop_event):
+                return {"ok": False, "fatal": False, "error": "stopped", "new_ip": None}
+
+    # 최종 실패: 같은 IP 로 다른 계정 돌리면 밴 위험 → 전체 중단
+    log_fn(f"🛑 IP 변경 최종 실패 (before={before_ip}) - 전체 작업 중단")
+    log_fn("→ 폰 재부팅 / USB 테더링 재시작 / WiFi 테더링 전환 후 재실행 권장")
+    return {"ok": False, "fatal": True, "error": "ip_not_rotated", "new_ip": before_ip}
+
+
+async def _run_with_account(account, log_fn, stop_event, do_work, ip_mode=DEFAULT_IP_MODE):
+    """계정의 IP 설정에 맞춰 세션을 열고 do_work(page) 실행.
+
+    ip_mode:
+      "proxy" — 계정의 proxy 필드로 브라우저 실행 + 실 IP 검증.
+      "adb"   — 비행기모드 토글로 PC IP 갱신 후 프록시 없이 브라우저 실행.
 
     do_work: async callable(page) -> any
     Returns: {"ok": bool, "fatal": bool, "error": str or None, "result": any}
 
     fatal=True 인 경우(배치 전체 중단해야 함):
-      - 계정에 proxy 미설정 (IP 미변경 상태 → 보호조치 위험)
-      - 프록시 설정됐으나 실제 IP 가 프록시 IP 와 불일치 (프록시 연결 실패)
+      - [proxy] 계정에 proxy 미설정
+      - [proxy] 프록시 설정됐으나 실제 IP 불일치
+      - [adb]   ADB 디바이스 미연결
     """
+    acc_tag = f"{account.get('label', account.get('id', '?'))[:10]}"
+
+    if ip_mode == "adb":
+        # 1) IP 먼저 바꾸고 브라우저는 프록시 없이
+        rot = await _rotate_adb_ip(log_fn, stop_event)
+        if not rot["ok"]:
+            return {"ok": False, "fatal": rot["fatal"], "error": rot["error"], "result": None}
+        if stop_event and stop_event.is_set():
+            return {"ok": False, "fatal": False, "error": "stopped", "result": None}
+        try:
+            async with new_session(proxy=None) as (ctx, page):
+                if stop_event and stop_event.is_set():
+                    return {"ok": False, "fatal": False, "error": "stopped", "result": None}
+                result = await do_work(page)
+                return {"ok": True, "fatal": False, "error": None, "result": result}
+        except CaptchaDetected:
+            log_fn(f"  🔄 {acc_tag} 캡챠 감지 — 새 세션 재시도 요청")
+            return {"ok": False, "fatal": False, "error": "captcha_retry", "result": None, "captcha": True}
+        except Exception as e:
+            log_fn(f"❌ {acc_tag} 세션 오류: {e}")
+            return {"ok": False, "fatal": False, "error": str(e), "result": None}
+
+    # ── proxy 모드 (기본) ──
     proxy = (account.get("proxy") or "").strip()
     expected_ip = expected_ip_from_proxy(proxy)
-    acc_tag = f"{account.get('label', account.get('id', '?'))[:10]}"
 
     if not proxy:
         log_fn(f"❌ {acc_tag} 프록시 미설정 - IP 미변경 위험으로 중단")
@@ -228,8 +303,6 @@ async def _run_with_account(account, log_fn, stop_event, do_work):
             result = await do_work(page)
             return {"ok": True, "fatal": False, "error": None, "result": result}
     except CaptchaDetected as e:
-        # 캡챠 감지: 브라우저가 이 지점에서 이미 닫힘 (async with 종료)
-        # 새 세션 = 새 지문으로 재시도하도록 상위에 신호
         log_fn(f"  🔄 {acc_tag} 캡챠 감지 — 새 세션 재시도 요청")
         return {"ok": False, "fatal": False, "error": "captcha_retry", "result": None, "captcha": True}
     except Exception as e:
@@ -237,12 +310,10 @@ async def _run_with_account(account, log_fn, stop_event, do_work):
         return {"ok": False, "fatal": False, "error": str(e), "result": None}
 
 
-async def _run_with_account_retry(account, log_fn, stop_event, do_work, captcha_retry_limit=2):
-    """_run_with_account + 캡챠 자동 재시도 래퍼.
-    캡챠 감지 시 새 세션으로 재시도 (최대 captcha_retry_limit 회).
-    """
+async def _run_with_account_retry(account, log_fn, stop_event, do_work, captcha_retry_limit=2, ip_mode=DEFAULT_IP_MODE):
+    """_run_with_account + 캡챠 자동 재시도 래퍼."""
     for attempt in range(captcha_retry_limit + 1):
-        r = await _run_with_account(account, log_fn, stop_event, do_work)
+        r = await _run_with_account(account, log_fn, stop_event, do_work, ip_mode=ip_mode)
         if not r.get("captcha"):
             return r
         if attempt < captcha_retry_limit:
@@ -261,12 +332,15 @@ def _halt(stop_event, log_fn, reason):
         stop_event.set()
 
 
-async def _compute_base_offset(main_acc, post_url, log_fn):
+async def _compute_base_offset(main_acc, post_url, log_fn, ip_mode=DEFAULT_IP_MODE):
     """게시글의 기존 최상위 댓글 수를 세어 반환.
-    이어하기 시 to_index 오프셋 계산용. 메인 계정의 프록시로 세션 오픈.
+    이어하기 시 to_index 오프셋 계산용.
+    proxy 모드: 메인 계정 프록시 사용 / adb 모드: 프록시 없이 현재 PC IP.
     """
-    proxy = (main_acc.get("proxy") or "").strip()
-    if not proxy or not post_url:
+    if not post_url:
+        return 0
+    proxy = None if ip_mode == "adb" else (main_acc.get("proxy") or "").strip()
+    if ip_mode == "proxy" and not proxy:
         return 0
     try:
         async with new_session(proxy=proxy) as (ctx, page):
@@ -296,6 +370,13 @@ async def run_task(task, log_fn, stop_event=None):
     delays = task.get("delays", DEFAULT_DELAYS)
     main = task["main_account"]
     post_url = task.get("post_url", "")
+    ip_mode = (task.get("ip_mode") or DEFAULT_IP_MODE).lower()
+    if ip_mode not in ("proxy", "adb"):
+        ip_mode = DEFAULT_IP_MODE
+    log_fn(f"🔧 IP 모드: {'ADB 테더링' if ip_mode == 'adb' else 'HTTP 프록시'}")
+    if ip_mode == "adb" and not is_device_connected():
+        log_fn("❌ ADB 디바이스 미연결 상태로 작업 시작 불가")
+        return {"success": False, "error": "adb_not_connected"}
 
     def should_stop():
         return stop_event and stop_event.is_set()
@@ -309,7 +390,7 @@ async def run_task(task, log_fn, stop_event=None):
     current_step = 0
 
     # 메인 지속 세션: 작성자 모든 활동(글 작성/수정, base_offset, 작성자 대댓글)을 여기서 처리
-    main_session = PersistentMainSession(main, log_fn)
+    main_session = PersistentMainSession(main, log_fn, ip_mode=ip_mode)
     try:
         try:
             await main_session.open_with_captcha_retry(retry_limit=2)
@@ -388,7 +469,7 @@ async def run_task(task, log_fn, stop_event=None):
                 await random_delay("after_comment_submit", delays, stop_event)
                 return {}
 
-            r = await _run_with_account_retry(acc, log_fn, stop_event, _do_comment)
+            r = await _run_with_account_retry(acc, log_fn, stop_event, _do_comment, ip_mode=ip_mode)
             if not r["ok"]:
                 if r.get("fatal"):
                     _halt(stop_event, log_fn, f"댓글 {i+1} IP 문제 ({r['error']})")
@@ -512,7 +593,7 @@ async def run_task(task, log_fn, stop_event=None):
                         await random_delay("after_comment_submit", delays, stop_event)
                         return {"comment_ok": True}
 
-                    r = await _run_with_account_retry(acc, log_fn, stop_event, _do_action)
+                    r = await _run_with_account_retry(acc, log_fn, stop_event, _do_action, ip_mode=ip_mode)
 
                     if act["action"] == "comment":
                         succ = bool(r["ok"]) and bool((r.get("result") or {}).get("comment_ok", False))

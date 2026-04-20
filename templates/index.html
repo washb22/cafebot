@@ -23,6 +23,15 @@
   .status-dot.off { background:var(--danger); }
   .status-dot.warn { background:#ffc107; }
 
+  /* IP 모드 토글 (nav 우측) */
+  .ipmode-toggle { display:inline-flex; gap:2px; background:var(--surface2); border:1px solid var(--border);
+    border-radius:6px; padding:2px; margin-right:6px; }
+  .ipmode-btn { padding:4px 10px; border:none; background:none; color:var(--muted); border-radius:4px;
+    font-size:11px; font-weight:700; cursor:pointer; transition:all .15s; font-family:inherit; }
+  .ipmode-btn:hover { color:var(--text); }
+  .ipmode-btn.active { background:linear-gradient(135deg,var(--accent),var(--accent2)); color:#fff; }
+  .ipmode-btn.active:hover { opacity:.9; }
+
   .layout { display:grid; grid-template-columns:1fr 380px; height:calc(100vh - 52px); }
 
   /* ── Left: Task Setup ── */
@@ -164,7 +173,12 @@
 <nav>
   <div class="nav-logo">CafeBot</div>
   <div class="nav-status">
-    <span>프록시: <span class="status-dot" id="proxyDot"></span> <span id="proxyText">확인 중</span></span>
+    <div class="ipmode-toggle" title="IP 변경 방식 선택">
+      <button type="button" class="ipmode-btn active" data-mode="proxy" onclick="setIpMode('proxy')">🌐 프록시</button>
+      <button type="button" class="ipmode-btn" data-mode="adb" onclick="setIpMode('adb')">📱 ADB 테더링</button>
+    </div>
+    <span id="proxyStatusWrap">프록시: <span class="status-dot" id="proxyDot"></span> <span id="proxyText">확인 중</span></span>
+    <span id="adbStatusWrap" style="display:none">ADB: <span class="status-dot" id="adbDot"></span> <span id="adbText">확인 중</span></span>
     <span>PC IP: <span id="currentIp">-</span></span>
     <span id="licenseBadge" class="license-badge" onclick="showLicenseModal()" style="display:none"></span>
   </div>
@@ -432,6 +446,7 @@
 // ── State ──
 let accounts = { mains: [], commenters: [] };
 let taskMode = 'new';
+let ipMode = 'proxy';  // 'proxy' | 'adb' — 서버 /api/settings 와 동기화
 let eventSource = null;
 let scenarioImageNums = [];  // 현재 폼에서 파싱한 이미지 번호 목록
 let scenarioParsed = null;   // 현재 폼에서 파싱된 결과 (addToQueue 용)
@@ -441,12 +456,58 @@ let queue = [];              // 배치 큐 — 각 항목: { mode, file, text, p
 // ── Init ──
 async function init() {
   await checkLicense();
+  await loadIpMode();
   await loadAccounts();
   checkAdb();
   setInterval(checkAdb, 30000);
   connectSSE();
   renderQueue();
   setupScrollListener();
+}
+
+// ── IP Mode (proxy / adb) ──
+async function loadIpMode() {
+  try {
+    const res = await fetch('/api/settings');
+    const data = await res.json();
+    ipMode = (data.ip_mode === 'adb') ? 'adb' : 'proxy';
+  } catch(e) {
+    ipMode = 'proxy';
+  }
+  applyIpModeUI();
+}
+
+async function setIpMode(mode) {
+  if (mode !== 'proxy' && mode !== 'adb') return;
+  if (mode === ipMode) return;
+  try {
+    const res = await fetch('/api/settings', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ ip_mode: mode }),
+    });
+    const data = await res.json();
+    if (data.success) {
+      ipMode = mode;
+      applyIpModeUI();
+      checkAdb();
+      addLog('--:--:--', `🔧 IP 모드 변경: ${mode === 'adb' ? 'ADB 테더링' : 'HTTP 프록시'}`);
+    } else {
+      alert(data.error || '모드 변경 실패');
+    }
+  } catch(e) {
+    alert('서버 통신 실패: ' + e);
+  }
+}
+
+function applyIpModeUI() {
+  document.querySelectorAll('.ipmode-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.mode === ipMode);
+  });
+  const isProxy = ipMode === 'proxy';
+  const pw = document.getElementById('proxyStatusWrap');
+  const aw = document.getElementById('adbStatusWrap');
+  if (pw) pw.style.display = isProxy ? '' : 'none';
+  if (aw) aw.style.display = isProxy ? 'none' : '';
 }
 
 // ── License ──
@@ -868,14 +929,28 @@ function addReplyRow() {
   container.appendChild(div);
 }
 
-// ── Proxy / PC IP status ──
+// ── Proxy / ADB / PC IP status ──
 async function checkAdb() {
-  // 이름 유지(호출부 호환) - 실제로는 프록시/IP 상태 갱신
+  // 현재 PC 공인 IP + ADB 디바이스 연결 상태 갱신
+  let adbConnected = false;
   try {
     const res = await fetch('/api/adb/status');
     const data = await res.json();
     document.getElementById('currentIp').textContent = data.ip || '-';
+    adbConnected = !!data.connected;
   } catch(e) {}
+
+  // ADB 상태 표시 (ADB 모드일 때만 보이지만, 상태는 항상 갱신)
+  try {
+    const adot = document.getElementById('adbDot');
+    const atxt = document.getElementById('adbText');
+    if (adot && atxt) {
+      adot.className = 'status-dot ' + (adbConnected ? 'on' : 'off');
+      atxt.textContent = adbConnected ? '연결됨' : '미연결';
+    }
+  } catch(e) {}
+
+  // 프록시 매핑 상태 표시
   try {
     const total = (accounts.mains?.length || 0) + (accounts.commenters?.length || 0);
     const filled = [...(accounts.mains||[]), ...(accounts.commenters||[])]
@@ -896,7 +971,8 @@ async function checkAdb() {
       txt.textContent = `${filled}/${total} 완료`;
     }
   } catch(e) {
-    document.getElementById('proxyText').textContent = '오류';
+    const pt = document.getElementById('proxyText');
+    if (pt) pt.textContent = '오류';
   }
 }
 

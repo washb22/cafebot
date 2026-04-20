@@ -75,14 +75,20 @@ async def _single_toggle(log, wait_on=15, wait_off_loop=30, stop_event=None):
 
 
 async def toggle_airplane_mode(log_fn=None, stop_event=None):
-    """비행기 모드 토글. 1차 실패 시 더 길게 대기하고 재시도"""
+    """비행기 모드 토글. 1차 실패 시 더 길게 대기하고 재시도.
+
+    Returns: 변경된 new_ip (성공) / None (IP 변경 실패 — old_ip 그대로인 경우도 None).
+             호출측에서 None 을 받으면 전체 중단 처리 필요.
+    """
     def log(msg):
         if log_fn:
             log_fn(msg)
 
     # 1차 시도 (5초 - 빠른 경로)
     new_ip, old_ip = await _single_toggle(log, wait_on=5, wait_off_loop=30, stop_event=stop_event)
-    if (stop_event and stop_event.is_set()) or (new_ip and new_ip != old_ip):
+    if stop_event and stop_event.is_set():
+        return new_ip if new_ip and new_ip != old_ip else None
+    if new_ip and new_ip != old_ip:
         return new_ip
 
     # 2차 시도: 더 길게 대기 (통신사 sticky IP 회피)
@@ -91,9 +97,9 @@ async def toggle_airplane_mode(log_fn=None, stop_event=None):
     if new_ip2 and new_ip2 != old_ip:
         return new_ip2
 
-    log(f"⚠ IP 변경 실패 (현재: {new_ip2 or '없음'}). 통신사 sticky IP 가능성.")
+    log(f"⚠ IP 변경 실패 (현재: {new_ip2 or '없음'}, 이전: {old_ip}). 통신사 sticky IP 가능성.")
     log("→ 폰 재부팅 OR USB 테더링 껐다 켜기 OR WiFi 테더링으로 전환 권장")
-    return new_ip2 or old_ip
+    return None  # 명확히 실패 신호
 
 
 async def manual_ip_change(log_fn=None, stop_event=None):
