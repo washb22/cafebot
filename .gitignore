@@ -2,3 +2,11 @@ data/
 logs/
 __pycache__/
 *.pyc
+
+# 빌드 산출물
+dist/
+dist_obf/
+build/cafebot/
+installer_output/
+debug_shots/
+test_*.py

@@ -422,7 +422,7 @@ def run_comment_only():
             commenter_map[int(m.group())] = c
 
     ip_mode = get_ip_mode()
-    exec_actions, err = build_shuffled_exec_actions(parsed, commenter_map, main_acc, ip_mode=ip_mode)
+    exec_actions, spare_commenters, err = build_shuffled_exec_actions(parsed, commenter_map, main_acc, ip_mode=ip_mode)
     if err:
         return jsonify({"error": err}), 400
 
@@ -437,6 +437,7 @@ def run_comment_only():
         "comments": [],
         "replies": [],
         "scenario": exec_actions,
+        "spare_commenters": spare_commenters,
         "image_map": {},
         "ip_mode": ip_mode,
     }
@@ -663,7 +664,9 @@ def build_shuffled_exec_actions(parsed, commenter_map, main_acc, shuffle_label="
              "adb" 면 모든 등록 계정을 풀에 포함(IP 는 비행기모드 토글로 바꿈).
              None 이면 settings 에서 읽음.
 
-    Returns: (exec_actions, error_message_or_None)
+    Returns: (exec_actions, spare_commenters, error_message_or_None)
+      spare_commenters: 시나리오에 배정되지 않은 여분 댓글러 풀.
+        proxy 모드에서 task_runner 가 unreachable 발생 시 교체용으로 사용.
     """
     if ip_mode is None:
         ip_mode = get_ip_mode()
@@ -675,14 +678,14 @@ def build_shuffled_exec_actions(parsed, commenter_map, main_acc, shuffle_label="
         # 프록시 설정된 commenter 만 셔플 풀에 포함 (IP 미변경 방지)
         available = [k for k, v in commenter_map.items() if (v.get("proxy") or "").strip()]
         if len(available) < len(needed_nums):
-            return None, (
+            return None, [], (
                 f"프록시 설정된 commenter 부족: 필요 {len(needed_nums)}개 / "
                 f"프록시 설정됨 {len(available)}개 (전체 {total}개). "
                 "계정 관리 → 프록시 매핑에서 host:port 입력 후 저장하거나, "
                 "우측 상단에서 ADB 모드로 전환하세요."
             )
         if not (main_acc.get("proxy") or "").strip():
-            return None, (
+            return None, [], (
                 f"글 작성자({main_acc.get('id','?')}) 에 프록시가 설정되지 않았습니다. "
                 "계정 관리 → 프록시 매핑에서 설정하거나, ADB 모드로 전환하세요."
             )
@@ -690,7 +693,7 @@ def build_shuffled_exec_actions(parsed, commenter_map, main_acc, shuffle_label="
         # ADB 모드: 모든 등록 계정이 풀 (프록시 필드 무시)
         available = list(commenter_map.keys())
         if len(available) < len(needed_nums):
-            return None, (
+            return None, [], (
                 f"commenter 계정 부족: 필요 {len(needed_nums)}개 / 등록 {total}개."
             )
 
@@ -707,7 +710,7 @@ def build_shuffled_exec_actions(parsed, commenter_map, main_acc, shuffle_label="
         if act["action"] == "comment":
             acc = role_to_account.get(act["commenter_num"])
             if not acc:
-                return None, f"댓글 {act['commenter_num']} 계정이 등록되지 않음"
+                return None, [], f"댓글 {act['commenter_num']} 계정이 등록되지 않음"
             exec_actions.append({"action": "comment", "account": acc, "text": act["text"]})
         elif act["action"] == "reply":
             if act.get("is_main"):
@@ -715,12 +718,17 @@ def build_shuffled_exec_actions(parsed, commenter_map, main_acc, shuffle_label="
             else:
                 acc = role_to_account.get(act["commenter_num"])
                 if not acc:
-                    return None, f"ㄴ 댓글 {act['commenter_num']} 계정이 등록되지 않음"
+                    return None, [], f"ㄴ 댓글 {act['commenter_num']} 계정이 등록되지 않음"
             exec_actions.append({
                 "action": "reply", "account": acc,
                 "to_index": act["to_index"], "text": act["text"],
                 "is_main": bool(act.get("is_main")),  # 2-브라우저 구조 플래그 (task_runner 가 사용)
             })
+
+    # 여분 댓글러 풀 (배정되지 않은 계정 — proxy 모드에서 unreachable 발생 시 교체용)
+    picked_set = set(picked)
+    spare_commenters = [commenter_map[k] for k in available if k not in picked_set]
+    random.shuffle(spare_commenters)
 
     # 디버그용 요약
     mapping_summary = ", ".join(
@@ -728,8 +736,10 @@ def build_shuffled_exec_actions(parsed, commenter_map, main_acc, shuffle_label="
         for role in needed_nums
     )
     _emit_log(f"[계정셔플{shuffle_label}] {mapping_summary}")
+    if spare_commenters:
+        _emit_log(f"[교체풀{shuffle_label}] 여분 댓글러 {len(spare_commenters)}개 (프록시 unreachable 시 자동 교체)")
 
-    return exec_actions, None
+    return exec_actions, spare_commenters, None
 
 
 @app.route("/api/scenario/parse", methods=["POST"])
@@ -833,7 +843,7 @@ def run_scenario():
 
     ip_mode = get_ip_mode()
     # 시나리오 actions → 실행용 actions (계정 셔플 + 그룹 순서 셔플)
-    exec_actions, err = build_shuffled_exec_actions(parsed, commenter_map, main_acc, ip_mode=ip_mode)
+    exec_actions, spare_commenters, err = build_shuffled_exec_actions(parsed, commenter_map, main_acc, ip_mode=ip_mode)
     if err:
         return jsonify({"error": err}), 400
 
@@ -847,6 +857,7 @@ def run_scenario():
         "comments": [],
         "replies": [],
         "scenario": exec_actions,
+        "spare_commenters": spare_commenters,
         "image_map": image_map,
         "ip_mode": ip_mode,
     }
@@ -948,7 +959,7 @@ def run_queue():
             image_map[num] = path
 
         # 시나리오 actions → 실행용 (계정 셔플 + 그룹 순서 셔플, 글마다 독립 재셔플)
-        exec_actions, err = build_shuffled_exec_actions(
+        exec_actions, spare_commenters, err = build_shuffled_exec_actions(
             parsed, commenter_map, main_acc, shuffle_label=f" 글{i+1}", ip_mode=batch_ip_mode
         )
         if err:
@@ -965,6 +976,7 @@ def run_queue():
             "comments": [],
             "replies": [],
             "scenario": exec_actions,
+            "spare_commenters": spare_commenters,
             "image_map": image_map,
             "ip_mode": batch_ip_mode,
         })

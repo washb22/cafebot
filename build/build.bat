@@ -45,9 +45,10 @@ mkdir dist\CafeBot\data 2>nul
 echo {"mains":[],"commenters":[]} > dist\CafeBot\data\accounts.json
 xcopy dist_obf\adb dist\CafeBot\adb\ /E /I /Y >nul
 
-REM Playwright 브라우저 복사
-echo 브라우저 번들링 (약 400MB, 시간 소요)...
+REM Playwright 브라우저 복사 (chromium + headless_shell 둘 다 필수)
+echo 브라우저 번들링 (약 450MB, 시간 소요)...
 xcopy "%LOCALAPPDATA%\ms-playwright\chromium-1208" "dist\CafeBot\browsers\chromium-1208\" /E /I /Y >nul
+xcopy "%LOCALAPPDATA%\ms-playwright\chromium_headless_shell-1208" "dist\CafeBot\browsers\chromium_headless_shell-1208\" /E /I /Y >nul
 
 REM Step 6: Inno Setup 인스톨러 생성
 echo [6/6] Inno Setup 인스톨러 빌드...
@@ -70,7 +71,7 @@ echo.
 echo ========================================
 echo   빌드 완료!
 echo   - 실행 폴더: dist\CafeBot
-echo   - 인스톨러 : installer_output\CafeBot_Setup_v1.2.exe
+echo   - 인스톨러 : installer_output\CafeBot_Setup_v1.3.exe
 echo ========================================
 echo.
 pause

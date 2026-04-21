@@ -325,6 +325,40 @@ async def _run_with_account_retry(account, log_fn, stop_event, do_work, captcha_
     return r
 
 
+async def _run_with_replacement(account, spare_pool, log_fn, stop_event,
+                                make_do_work, ip_mode=DEFAULT_IP_MODE,
+                                replace_limit=3):
+    """_run_with_account_retry + 프록시 unreachable 시 spare_pool 에서 자동 교체.
+
+    proxy 모드에서만 의미 있음 (adb 모드는 spare_pool 비어있고 unreachable 도 안 뜸).
+
+    make_do_work(acc): 새 계정으로 클로저 do_work 를 다시 만드는 팩토리.
+    spare_pool: list — 사용된 spare 는 pop 되어 다음 액션에서 재사용 안 됨.
+
+    Returns: (result_dict, used_account)
+    """
+    current = account
+    for replace_attempt in range(replace_limit + 1):
+        do_work = make_do_work(current)
+        r = await _run_with_account_retry(current, log_fn, stop_event, do_work, ip_mode=ip_mode)
+        # 성공 / fatal / unreachable 외 실패 → 그대로 반환
+        if r["ok"] or r.get("fatal") or r.get("error") != "proxy_unreachable":
+            return r, current
+        # proxy_unreachable: 교체 시도
+        if not spare_pool:
+            log_fn(f"  ⚠ 교체 풀 소진 — 더 이상 교체 불가, 스킵")
+            return r, current
+        if replace_attempt >= replace_limit:
+            log_fn(f"  ⚠ 교체 {replace_limit}회 한계 초과 — 스킵")
+            return r, current
+        old_tag = current.get("label", current.get("id", "?"))[:10]
+        replacement = spare_pool.pop(0)
+        new_tag = replacement.get("label", replacement.get("id", "?"))[:10]
+        log_fn(f"  🔁 프록시 죽음 → 교체: {old_tag} → {new_tag} (남은 풀 {len(spare_pool)}개)")
+        current = replacement
+    return r, current
+
+
 def _halt(stop_event, log_fn, reason):
     """치명적 IP 문제 발생 시 전체 중단 플래그 설정."""
     log_fn(f"🛑 전체 작업 중단: {reason}")
@@ -370,6 +404,8 @@ async def run_task(task, log_fn, stop_event=None):
     delays = task.get("delays", DEFAULT_DELAYS)
     main = task["main_account"]
     post_url = task.get("post_url", "")
+    # 여분 댓글러 풀 (proxy 모드에서 unreachable 발생 시 교체용). 한 task 동안 공유 → 사용분만큼 줄어듦.
+    spare_pool = list(task.get("spare_commenters") or [])
     ip_mode = (task.get("ip_mode") or DEFAULT_IP_MODE).lower()
     if ip_mode not in ("proxy", "adb"):
         ip_mode = DEFAULT_IP_MODE
@@ -457,19 +493,24 @@ async def run_task(task, log_fn, stop_event=None):
             await random_delay("between_accounts", delays, stop_event)
 
             acc = comment_data["account"]
+            _text = comment_data["text"]
 
-            async def _do_comment(page, _acc=acc, _text=comment_data["text"]):
-                ok = await naver_login(page, _acc["id"], _acc["pw"], log_fn)
-                if not ok:
-                    return {"error": "로그인 실패"}
-                await random_delay("after_login", delays, stop_event)
-                if should_stop():
-                    return {"error": "stopped"}
-                await write_comment(page, post_url, _text, log_fn)
-                await random_delay("after_comment_submit", delays, stop_event)
-                return {}
+            def _make_do_comment(target_acc, _t=_text):
+                async def _do_comment(page):
+                    ok = await naver_login(page, target_acc["id"], target_acc["pw"], log_fn)
+                    if not ok:
+                        return {"error": "로그인 실패"}
+                    await random_delay("after_login", delays, stop_event)
+                    if should_stop():
+                        return {"error": "stopped"}
+                    await write_comment(page, post_url, _t, log_fn)
+                    await random_delay("after_comment_submit", delays, stop_event)
+                    return {}
+                return _do_comment
 
-            r = await _run_with_account_retry(acc, log_fn, stop_event, _do_comment, ip_mode=ip_mode)
+            r, _used_acc = await _run_with_replacement(
+                acc, spare_pool, log_fn, stop_event, _make_do_comment, ip_mode=ip_mode
+            )
             if not r["ok"]:
                 if r.get("fatal"):
                     _halt(stop_event, log_fn, f"댓글 {i+1} IP 문제 ({r['error']})")
@@ -572,28 +613,32 @@ async def run_task(task, log_fn, stop_event=None):
 
                     await random_delay("between_accounts", delays, stop_event)
 
-                    async def _do_action(page, _acc=acc, _act=act, _aidx=actual_idx):
-                        ok = await naver_login(page, _acc["id"], _acc["pw"], log_fn)
-                        if not ok:
-                            return {"error": "로그인 실패"}
-                        await random_delay("after_login", delays, stop_event)
-                        if should_stop():
-                            return {"error": "stopped"}
+                    def _make_do_action(target_acc, _act=act, _aidx=actual_idx):
+                        async def _do_action(page):
+                            ok = await naver_login(page, target_acc["id"], target_acc["pw"], log_fn)
+                            if not ok:
+                                return {"error": "로그인 실패"}
+                            await random_delay("after_login", delays, stop_event)
+                            if should_stop():
+                                return {"error": "stopped"}
 
-                        if _act["action"] == "comment":
-                            result = await write_comment(page, post_url, _act["text"], log_fn)
-                            if not result:
-                                return {"error": "댓글 작성 실패", "comment_ok": False}
-                        elif _act["action"] == "reply":
-                            log_fn(f"  (txt idx {_act['to_index']} → 페이지 #{_aidx+1})")
-                            result = await write_reply(page, post_url, _aidx, _act["text"], log_fn)
-                            if not result:
-                                return {"error": "대댓글 작성 실패"}
+                            if _act["action"] == "comment":
+                                result = await write_comment(page, post_url, _act["text"], log_fn)
+                                if not result:
+                                    return {"error": "댓글 작성 실패", "comment_ok": False}
+                            elif _act["action"] == "reply":
+                                log_fn(f"  (txt idx {_act['to_index']} → 페이지 #{_aidx+1})")
+                                result = await write_reply(page, post_url, _aidx, _act["text"], log_fn)
+                                if not result:
+                                    return {"error": "대댓글 작성 실패"}
 
-                        await random_delay("after_comment_submit", delays, stop_event)
-                        return {"comment_ok": True}
+                            await random_delay("after_comment_submit", delays, stop_event)
+                            return {"comment_ok": True}
+                        return _do_action
 
-                    r = await _run_with_account_retry(acc, log_fn, stop_event, _do_action, ip_mode=ip_mode)
+                    r, _used_acc = await _run_with_replacement(
+                        acc, spare_pool, log_fn, stop_event, _make_do_action, ip_mode=ip_mode
+                    )
 
                     if act["action"] == "comment":
                         succ = bool(r["ok"]) and bool((r.get("result") or {}).get("comment_ok", False))
