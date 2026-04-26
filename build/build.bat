@@ -71,7 +71,7 @@ echo.
 echo ========================================
 echo   빌드 완료!
 echo   - 실행 폴더: dist\CafeBot
-echo   - 인스톨러 : installer_output\CafeBot_Setup_v1.5.exe
+echo   - 인스톨러 : installer_output\CafeBot_Setup_v1.6.exe
 echo ========================================
 echo.
 pause
