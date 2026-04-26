@@ -45,6 +45,10 @@ def parse_scenario_text(text):
     # 빈줄 정리 + \r 제거
     text = text.replace('\r\n', '\n').replace('\r', '\n')
 
+    # 구버전 [댓글차단] 마커 (v1.4 잠깐 도입 후 제거됨) — 댓글 본문에 섞이지 않도록 무음 제거.
+    # v1.5 부터 UI 체크박스로 옮겨졌으므로 여기서는 단순 strip.
+    text = re.sub(r'^\s*\[\s*댓글\s*차단\s*\]\s*$', '', text, flags=re.MULTILINE)
+
     # --- 기준으로 분할
     sections = text.split('---')
 

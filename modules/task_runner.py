@@ -5,7 +5,7 @@ from playwright.async_api import async_playwright
 
 from modules.browser import new_session, _normalize_proxy, USER_AGENTS, VIEWPORTS
 from modules.naver_auth import naver_login, CaptchaDetected
-from modules.naver_post import write_post, edit_post
+from modules.naver_post import write_post, edit_post, disable_post_comments
 from modules.naver_comment import write_comment, write_reply, count_top_comments
 from modules.adb_network import interruptible_sleep, toggle_airplane_mode, is_device_connected, get_current_ip
 from modules.proxy_check import verify_proxy_ip, expected_ip_from_proxy
@@ -177,6 +177,13 @@ class PersistentMainSession:
             if not await self.reconnect():
                 return 0
         return await count_top_comments(self.page, post_url, self.log)
+
+    async def do_disable_comments(self, post_url):
+        """시나리오 종료 후 작성자 세션으로 댓글 허용 체크 해제."""
+        if self.page is None:
+            if not await self.reconnect():
+                return False
+        return await disable_post_comments(self.page, post_url, self.log)
 
 
 async def random_delay(key, delays=None, stop_event=None):
@@ -659,6 +666,20 @@ async def run_task(task, log_fn, stop_event=None):
                 log_fn(f"시나리오 댓글 결과: 성공 {succ_cnt} / 실패 {fail_cnt} (총 {len(comment_success)})")
             except Exception as e:
                 log_fn(f"⚠ 시나리오 실행 중 예외: {e}")
+
+        # ═══════════════════════════════════════
+        # FINAL OPTIONAL: 댓글 허용 끄기 (UI 체크박스 → task['disable_comments_after']=True)
+        # ═══════════════════════════════════════
+        if post_url and task.get("disable_comments_after"):
+            log_fn(f"━━━ 댓글차단 단계 (메인 세션 재사용) ━━━")
+            try:
+                ok = await main_session.do_disable_comments(post_url)
+                if ok:
+                    log_fn("✓ 댓글 허용 끄기 완료")
+                else:
+                    log_fn("⚠ 댓글 허용 끄기 실패 (수동 확인 필요)")
+            except Exception as e:
+                log_fn(f"⚠ 댓글차단 예외: {e}")
 
         log_fn("━━━━━━━━━━━━━━━━━━━━━━━━")
         log_fn("✅ 작업 완료!")

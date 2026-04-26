@@ -392,9 +392,11 @@ def run_comment_only():
             "text": request.form.get("text", ""),
             "post_url": request.form.get("post_url", "").strip(),
             "main_id": request.form.get("main_id", "").strip(),
+            "disable_comments": bool(request.form.get("disable_comments", "").strip()),
         }
     else:
         data = request.json or {}
+        data["disable_comments"] = bool(data.get("disable_comments"))
 
     post_url = data.get("post_url", "").strip()
     if not post_url:
@@ -440,6 +442,7 @@ def run_comment_only():
         "spare_commenters": spare_commenters,
         "image_map": {},
         "ip_mode": ip_mode,
+        "disable_comments_after": data.get("disable_comments", False),
     }
 
     stop_event.clear()
@@ -807,6 +810,7 @@ def run_scenario():
             "cafe_url": request.form.get("cafe_url", ""),
             "board_name": request.form.get("board_name", ""),
             "main_id": request.form.get("main_id", ""),
+            "disable_comments": bool(request.form.get("disable_comments", "").strip()),
         }
         # image_1, image_2, ... 저장
         for key, f in request.files.items():
@@ -822,6 +826,7 @@ def run_scenario():
             image_map[num] = path
     else:
         data = request.json or {}
+        data["disable_comments"] = bool(data.get("disable_comments"))
 
     raw_text = data.get("text", "")
     try:
@@ -860,6 +865,7 @@ def run_scenario():
         "spare_commenters": spare_commenters,
         "image_map": image_map,
         "ip_mode": ip_mode,
+        "disable_comments_after": data.get("disable_comments", False),
     }
 
     stop_event.clear()
@@ -925,6 +931,7 @@ def run_queue():
         post_url_field = request.form.get(prefix + "post_url", "").strip()
         main_id = request.form.get(prefix + "main_id", "").strip()
         board_name = request.form.get(prefix + "board_name", "").strip()
+        disable_comments = bool(request.form.get(prefix + "disable_comments", "").strip())
 
         if not raw_text or not main_id:
             return jsonify({"error": f"작업 #{i+1}: text/main_id 누락"}), 400
@@ -979,6 +986,7 @@ def run_queue():
             "spare_commenters": spare_commenters,
             "image_map": image_map,
             "ip_mode": batch_ip_mode,
+            "disable_comments_after": disable_comments,
         })
 
     stop_event.clear()

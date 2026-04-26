@@ -428,6 +428,14 @@ async def _resolve_edit_url(page, post_url, log_fn=None):
         if log_fn:
             log_fn(msg)
 
+    # ArticleRead.nhn?clubid=...&articleid=... 형태면 리다이렉트 전에 직접 파싱
+    # (리다이렉트 후 page.url 은 o2note?iframe_url_utf8=... 로 바뀌어 추출 어려움)
+    if "ArticleRead" in post_url and "clubid=" in post_url and "articleid=" in post_url:
+        m_c = re.search(r'clubid=(\d+)', post_url)
+        m_a = re.search(r'articleid=(\d+)', post_url)
+        if m_c and m_a:
+            return f"https://cafe.naver.com/ca-fe/cafes/{m_c.group(1)}/articles/{m_a.group(1)}/modify"
+
     try:
         await page.goto(post_url, wait_until="domcontentloaded", timeout=30000)
     except Exception as e:
@@ -646,3 +654,166 @@ async def edit_post(page, post_url, title, body, log_fn=None, image_map=None):
     except Exception as e:
         log(f"글 수정 오류: {str(e)}")
         return None
+
+
+async def disable_post_comments(page, post_url, log_fn=None):
+    """기존 글 수정 페이지로 이동 → 우측 옵션의 '댓글 허용' 체크 해제 → 등록.
+
+    제목/본문은 건드리지 않음 — 이미 작성된 글의 댓글 차단만 수행.
+    시나리오 (글 작성 + 댓글 + 대댓글) 완료 후 마지막에 호출하는 용도.
+    """
+    def log(msg):
+        if log_fn:
+            log_fn(msg)
+
+    try:
+        page.on("dialog", lambda d: asyncio.create_task(d.dismiss()))
+
+        log(f"수정 URL 변환: {post_url}")
+        edit_url = await _resolve_edit_url(page, post_url, log_fn)
+        if not edit_url:
+            log("❌ 수정 URL 구성 실패 — 댓글차단 스킵")
+            return False
+
+        log(f"수정 페이지 이동: {edit_url}")
+        try:
+            await page.goto(edit_url, wait_until="domcontentloaded", timeout=30000)
+        except Exception as e:
+            log(f"이동 타임아웃(무시): {e}")
+        await human_delay(3, 5)
+
+        # 에디터 로딩 대기 (제목 textarea 에 기존값 채워질 때까지)
+        for _ in range(15):
+            ready = False
+            for t in [page] + list(page.frames):
+                try:
+                    tas = await t.query_selector_all('textarea[placeholder*="제목"], textarea.textarea_input')
+                    for ta in tas:
+                        val = await ta.evaluate("e => e.value")
+                        if val:
+                            ready = True
+                            break
+                    if ready:
+                        break
+                except Exception:
+                    pass
+            if ready:
+                break
+            await asyncio.sleep(1)
+
+        # '댓글 허용' 컨트롤 탐색 + 토글
+        toggled = False
+        info = ""
+        for t in [page] + list(page.frames):
+            try:
+                result = await t.evaluate(r"""
+                    () => {
+                        const out = {found: false, before: null, after: null, label: null, kind: null};
+                        const KEYWORDS = ['댓글 허용', '댓글허용', '댓글 사용', '댓글사용'];
+                        const labels = Array.from(document.querySelectorAll('label, span, div, button'));
+                        for (const lab of labels) {
+                            const txt = (lab.innerText || lab.textContent || '').trim();
+                            if (!KEYWORDS.some(k => txt.includes(k))) continue;
+                            if (txt.length > 30) continue;
+                            let inp = lab.querySelector('input[type="checkbox"]');
+                            if (!inp && lab.htmlFor) inp = document.getElementById(lab.htmlFor);
+                            if (!inp && lab.parentElement) inp = lab.parentElement.querySelector('input[type="checkbox"]');
+                            if (!inp) {
+                                let sib = lab.previousElementSibling;
+                                while (sib && !inp) {
+                                    if (sib.matches && sib.matches('input[type="checkbox"]')) inp = sib;
+                                    else if (sib.querySelector) inp = sib.querySelector('input[type="checkbox"]');
+                                    sib = sib.previousElementSibling;
+                                }
+                            }
+                            if (inp) {
+                                out.found = true;
+                                out.label = txt;
+                                out.kind = 'checkbox';
+                                out.before = inp.checked;
+                                if (inp.checked) inp.click();
+                                out.after = inp.checked;
+                                return out;
+                            }
+                            const sw = lab.querySelector('[role="switch"]') ||
+                                       (lab.parentElement && lab.parentElement.querySelector('[role="switch"]'));
+                            if (sw) {
+                                out.found = true;
+                                out.label = txt;
+                                out.kind = 'switch';
+                                out.before = sw.getAttribute('aria-checked');
+                                if (sw.getAttribute('aria-checked') === 'true') sw.click();
+                                out.after = sw.getAttribute('aria-checked');
+                                return out;
+                            }
+                        }
+                        return out;
+                    }
+                """)
+                if result and result.get('found'):
+                    toggled = True
+                    info = f"label={result.get('label')!r}, before={result.get('before')}, after={result.get('after')}"
+                    break
+            except Exception:
+                continue
+
+        if not toggled:
+            log("⚠ '댓글 허용' 컨트롤 미발견 — 스킵")
+            return False
+        log(f"✓ 댓글 허용 토글: {info}")
+
+        # 이미 꺼져 있던 경우(before=False)면 등록할 필요 없음
+        if info and "before=False" in info:
+            log("  (이미 댓글차단 상태 — 등록 생략)")
+            return True
+
+        await asyncio.sleep(1)
+
+        # 등록 버튼
+        pub_el = None
+        for t in [page] + list(page.frames):
+            try:
+                els = await t.query_selector_all('a, button')
+                for b in els:
+                    try:
+                        txt = (await b.text_content() or '').strip()
+                        if txt == '등록':
+                            box = await b.bounding_box()
+                            if box and box['width'] > 10 and box['x'] > 0 and box['y'] > 0:
+                                pub_el = b
+                                break
+                    except Exception:
+                        pass
+                if pub_el:
+                    break
+            except Exception:
+                pass
+
+        if not pub_el:
+            log("⚠ 등록 버튼 미발견")
+            return False
+
+        await _wait_popup_dim_gone(page, log)
+        try:
+            await pub_el.click(timeout=15000)
+        except Exception as e:
+            log(f"⚠ 일반 클릭 실패 → force: {str(e)[:60]}")
+            await pub_el.click(force=True, timeout=10000)
+
+        for _ in range(15):
+            await asyncio.sleep(1)
+            cur = page.url
+            if "/modify" not in cur and "/articles/write" not in cur and "ArticleWrite" not in cur:
+                break
+
+        if "/modify" in page.url or "/articles/write" in page.url:
+            log(f"❌ 댓글차단 등록 후에도 편집 페이지: {page.url}")
+            return False
+
+        log(f"✓ 댓글차단 등록 완료")
+        await _cleanup_residual_ui(page, log)
+        return True
+
+    except Exception as e:
+        log(f"댓글차단 오류: {str(e)}")
+        return False

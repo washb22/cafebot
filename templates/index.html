@@ -294,6 +294,10 @@
         </div>
         <div id="scenarioImageSlots"></div>
         <div id="scenarioPreview" style="display:none;margin-top:8px;padding:8px;background:rgba(0,0,0,0.2);border-radius:6px;font-size:12px"></div>
+        <label style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:13px;color:var(--text);cursor:pointer">
+          <input type="checkbox" id="scenarioDisableComments" style="width:16px;height:16px;cursor:pointer">
+          <span>🔒 작업 완료 후 <strong>댓글 허용 끄기</strong> (자동 수정·등록)</span>
+        </label>
         <button id="btnAddToQueue" class="btn btn-outline" style="margin-top:10px;width:100%" onclick="addToQueue()" disabled>➕ 작업 목록에 추가</button>
       </div>
 
@@ -319,6 +323,10 @@
         <input type="file" id="commentOnlyFile" accept=".txt" class="form-input" onchange="previewCommentOnly()">
       </div>
       <div id="commentOnlyPreview" style="display:none;margin-top:8px;padding:8px;background:rgba(0,0,0,0.2);border-radius:6px;font-size:12px"></div>
+      <label style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:13px;color:var(--text);cursor:pointer">
+        <input type="checkbox" id="commentOnlyDisableComments" style="width:16px;height:16px;cursor:pointer">
+        <span>🔒 댓글 작업 완료 후 <strong>댓글 허용 끄기</strong> (자동 수정·등록)</span>
+      </label>
       <button id="btnCommentOnlyRun" class="btn btn-primary" style="margin-top:10px;width:100%;padding:12px;font-size:14px" onclick="runCommentOnly()" disabled>▶ 댓글 작업 시작</button>
     </div>
 
@@ -1440,7 +1448,7 @@ function renderQueue() {
               <span style="color:var(--accent)"> · #${i+1} · ${mainLabel}</span>
             </div>
             <div style="font-size:13px;font-weight:600;margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escHtml(title)}</div>
-            <div style="font-size:11px;color:var(--muted)">댓글 ${commentCount} · 대댓글 ${replyCount}${imgCount ? ` · 📷 ${imgCount}` : ''}</div>
+            <div style="font-size:11px;color:var(--muted)">댓글 ${commentCount} · 대댓글 ${replyCount}${imgCount ? ` · 📷 ${imgCount}` : ''}${item.disable_comments ? ` · <span style="color:var(--warn)">🔒 댓글차단</span>` : ''}</div>
             <div style="font-size:10px;color:var(--muted);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escHtml(urlShown)}</div>
           </div>
           <button class="btn btn-danger btn-sm" onclick="removeFromQueue(${i})">×</button>
@@ -1476,6 +1484,8 @@ function addToQueue() {
     images[num] = f;
   }
 
+  const disableComments = document.getElementById('scenarioDisableComments').checked;
+
   queue.push({
     mode: queueMode,
     text: scenarioText,
@@ -1485,6 +1495,7 @@ function addToQueue() {
     post_url: postUrl,
     board_name: boardName,
     images: images,
+    disable_comments: disableComments,
   });
 
   // 폼 리셋
@@ -1494,6 +1505,7 @@ function addToQueue() {
   document.getElementById('scenarioBoardName').value = '';
   document.getElementById('scenarioPreview').style.display = 'none';
   document.getElementById('scenarioImageSlots').innerHTML = '';
+  document.getElementById('scenarioDisableComments').checked = false;
   document.getElementById('btnAddToQueue').disabled = true;
   scenarioText = '';
   scenarioParsed = null;
@@ -1520,6 +1532,7 @@ async function runQueue() {
     fd.append(`s${i}_post_url`, item.post_url || '');
     fd.append(`s${i}_main_id`, item.main_id);
     fd.append(`s${i}_board_name`, item.board_name || '');
+    fd.append(`s${i}_disable_comments`, item.disable_comments ? '1' : '');
     Object.entries(item.images).forEach(([num, f]) => {
       fd.append(`s${i}_image_${num}`, f);
     });
@@ -1660,6 +1673,7 @@ async function runCommentOnly() {
   fd.append('text', commentOnlyText);
   fd.append('post_url', postUrl);
   fd.append('main_id', mainId);
+  fd.append('disable_comments', document.getElementById('commentOnlyDisableComments').checked ? '1' : '');
 
   try {
     const res = await fetch('/api/comment-only/run', { method: 'POST', body: fd });
