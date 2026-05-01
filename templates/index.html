@@ -65,6 +65,7 @@
     border:1px solid var(--border); border-radius:20px; font-size:12px; margin:2px; }
   .account-tag .role { color:var(--accent); font-weight:700; font-size:10px; }
   .account-tag .del { cursor:pointer; color:var(--danger); font-size:14px; }
+  .account-tag input[type="checkbox"] { width:13px; height:13px; cursor:pointer; accent-color:var(--accent); flex-shrink:0; }
 
   /* Comment rows */
   .comment-row { background:var(--surface2); border:1px solid var(--border); border-radius:8px; padding:10px; margin-bottom:8px; }
@@ -202,7 +203,11 @@
     <!-- Accounts -->
     <div class="section">
       <div class="section-title">계정 관리</div>
-      <div id="accountsList" style="margin-bottom:10px"></div>
+      <div id="accountsList" style="margin-bottom:6px"></div>
+      <div style="display:flex;gap:6px;margin-bottom:8px;align-items:center">
+        <button class="btn btn-outline btn-sm" onclick="removeSelected()">선택 삭제</button>
+        <button class="btn btn-outline btn-sm" style="color:var(--danger);border-color:var(--danger)" onclick="removeAll()">전체 삭제</button>
+      </div>
       <div style="display:flex;gap:6px">
         <input id="accId" class="form-input" placeholder="네이버 ID" style="flex:1">
         <input id="accPw" class="form-input" type="password" placeholder="비밀번호" style="flex:1">
@@ -536,7 +541,13 @@ async function checkLicense() {
       showLicenseModal();
     }
   } catch(e) {
-    // 라이선스 서버 미연결 시 무시 (개발 모드)
+    console.error('License check failed:', e);
+    const badge = document.getElementById('licenseBadge');
+    badge.style.display = 'inline';
+    badge.className = 'license-badge invalid';
+    badge.textContent = '미인증';
+    badge.title = '라이선스 확인 실패';
+    showLicenseModal();
   }
 }
 
@@ -680,10 +691,10 @@ function renderAccounts() {
   const el = document.getElementById('accountsList');
   let html = '';
   accounts.mains.forEach((m, i) => {
-    html += `<div class="account-tag"><span class="role">글${i+1}</span>${m.id}<span class="del" onclick="removeAccount('main',${i})">×</span></div>`;
+    html += `<div class="account-tag"><input type="checkbox" data-type="main" data-idx="${i}"><span class="role">글${i+1}</span>${m.id}<span class="del" onclick="removeAccount('main',${i})">×</span></div>`;
   });
   accounts.commenters.forEach((c, i) => {
-    html += `<div class="account-tag"><span class="role">댓글${i+1}</span>${c.id}<span class="del" onclick="removeAccount('commenter',${i})">×</span></div>`;
+    html += `<div class="account-tag"><input type="checkbox" data-type="commenter" data-idx="${i}"><span class="role">댓글${i+1}</span>${c.id}<span class="del" onclick="removeAccount('commenter',${i})">×</span></div>`;
   });
   el.innerHTML = html || '<span style="font-size:12px;color:var(--muted)">등록된 계정이 없습니다</span>';
 }
@@ -878,9 +889,37 @@ async function addAccount() {
 async function removeAccount(type, idx) {
   if (type === 'main') accounts.mains.splice(idx, 1);
   else accounts.commenters.splice(idx, 1);
-  // 라벨 재정렬
   accounts.mains.forEach((m, i) => m.label = `글 ${i+1}`);
   accounts.commenters.forEach((c, i) => c.label = `댓글 ${i+1}`);
+  await fetch('/api/accounts', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(accounts) });
+  renderAccounts();
+  updateMainSelects();
+  updateCommentSelects();
+  renderProxyMap();
+}
+
+async function removeSelected() {
+  const checked = [...document.querySelectorAll('#accountsList input[type="checkbox"]:checked')];
+  if (!checked.length) { alert('삭제할 계정을 선택해주세요'); return; }
+  const mainIdxs = checked.filter(c => c.dataset.type === 'main').map(c => parseInt(c.dataset.idx)).sort((a,b) => b-a);
+  const commenterIdxs = checked.filter(c => c.dataset.type === 'commenter').map(c => parseInt(c.dataset.idx)).sort((a,b) => b-a);
+  mainIdxs.forEach(i => accounts.mains.splice(i, 1));
+  commenterIdxs.forEach(i => accounts.commenters.splice(i, 1));
+  accounts.mains.forEach((m, i) => m.label = `글 ${i+1}`);
+  accounts.commenters.forEach((c, i) => c.label = `댓글 ${i+1}`);
+  await fetch('/api/accounts', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(accounts) });
+  renderAccounts();
+  updateMainSelects();
+  updateCommentSelects();
+  renderProxyMap();
+}
+
+async function removeAll() {
+  const total = accounts.mains.length + accounts.commenters.length;
+  if (!total) { alert('등록된 계정이 없습니다'); return; }
+  if (!confirm(`계정 ${total}개를 모두 삭제할까요?`)) return;
+  accounts.mains = [];
+  accounts.commenters = [];
   await fetch('/api/accounts', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(accounts) });
   renderAccounts();
   updateMainSelects();

@@ -227,7 +227,23 @@ async def _insert_image(page, image_path, log_fn=None):
             pass
 
 
-async def _type_body_with_images(page, body_el, body, image_map, log_fn=None):
+async def _insert_text(page, frame, line):
+    """SE4 커서 위치에 텍스트 한 줄 삽입.
+    execCommand('insertText')를 우선 사용 — 한 번에 삽입하므로 타이밍 경쟁 없음.
+    실패 시 keyboard.type 폴백.
+    """
+    try:
+        ok = await frame.evaluate(
+            "(t) => document.execCommand('insertText', false, t)", line
+        )
+        if ok:
+            return
+    except Exception:
+        pass
+    await page.keyboard.type(line, delay=random.randint(20, 40))
+
+
+async def _type_body_with_images(page, body_el, body_frame, body, image_map, log_fn=None):
     """본문을 [이미지N] 마커로 분할해 텍스트 + 이미지 순차 입력."""
     def log(msg):
         if log_fn:
@@ -250,27 +266,32 @@ async def _type_body_with_images(page, body_el, body, image_map, log_fn=None):
             lines = text.split("\n")
             for i, line in enumerate(lines):
                 if line.strip():
-                    await page.keyboard.type(line, delay=random.randint(15, 50))
+                    await _insert_text(page, body_frame, line)
                 if i < len(lines) - 1:
                     await page.keyboard.press("Enter")
-                    await human_delay(0.05, 0.15)
+                    await human_delay(0.3, 0.5)
         else:
             num = val
             path = (image_map or {}).get(num)
             if not path:
                 log(f"  ⚠ [이미지{num}] 마커는 있으나 업로드된 파일 없음 — 텍스트 유지")
-                await page.keyboard.type(f"[이미지{num}]", delay=random.randint(15, 50))
+                await _insert_text(page, body_frame, f"[이미지{num}]")
                 continue
             # 이미지 삽입 전후 개행
             await page.keyboard.press("Enter")
             await human_delay(0.2, 0.4)
             await _insert_image(page, path, log_fn)
-            # 이미지 삽입 후 커서를 다음 줄로
+            await human_delay(0.5, 0.8)
+            # SE4는 이미지 삽입 후 이미지를 selected 상태로 둠
+            # Escape로 선택 해제 → ArrowDown으로 이미지 아래 문단으로 커서 이동
             try:
-                await body_el.click()
+                await page.keyboard.press("Escape")
+                await human_delay(0.2, 0.3)
+                await page.keyboard.press("ArrowDown")
+                await human_delay(0.2, 0.3)
             except Exception:
                 pass
-            await human_delay(0.3, 0.6)
+            await human_delay(0.2, 0.3)
 
 
 async def write_post(page, cafe_url, title, body, board_name=None, log_fn=None, image_map=None):
@@ -352,15 +373,15 @@ async def write_post(page, cafe_url, title, body, board_name=None, log_fn=None, 
         # 이미지 마커가 있으면 분할 입력, 없으면 기존 방식
         if image_map and re.search(r'\[이미지\d+\]', body):
             log("본문 입력 (이미지 마커 포함)...")
-            await _type_body_with_images(page, body_el, body, image_map, log_fn)
+            await _type_body_with_images(page, body_el, body_frame, body, image_map, log_fn)
         else:
             lines = body.split("\n")
             for i, line in enumerate(lines):
                 if line.strip():
-                    await page.keyboard.type(line, delay=random.randint(15, 50))
+                    await _insert_text(page, body_frame, line)
                 if i < len(lines) - 1:
                     await page.keyboard.press("Enter")
-                    await human_delay(0.05, 0.15)
+                    await human_delay(0.3, 0.5)
         await human_delay(0.5, 1.2)
 
         # 등록 버튼 (A 태그, text='등록' 정확히 매칭, 임시등록 제외)
@@ -585,15 +606,15 @@ async def edit_post(page, post_url, title, body, log_fn=None, image_map=None):
 
         if image_map and re.search(r'\[이미지\d+\]', body):
             log("본문 입력 (이미지 마커 포함)...")
-            await _type_body_with_images(page, body_el, body, image_map, log_fn)
+            await _type_body_with_images(page, body_el, body_frame, body, image_map, log_fn)
         else:
             lines = body.split("\n")
             for i, line in enumerate(lines):
                 if line.strip():
-                    await page.keyboard.type(line, delay=random.randint(15, 50))
+                    await _insert_text(page, body_frame, line)
                 if i < len(lines) - 1:
                     await page.keyboard.press("Enter")
-                    await human_delay(0.05, 0.15)
+                    await human_delay(0.3, 0.5)
         await human_delay(0.5, 1.2)
 
         # 등록 버튼 (write_post 와 동일 — 수정 모드에서도 '등록' 텍스트)
